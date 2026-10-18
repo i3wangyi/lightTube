@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,7 +26,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintf(w, `lightTube — small, fast YouTube client
 
 Usage:
-  lighttube
+  lighttube [--external-player] [--debug]
   lighttube play <url> [--audio]
   lighttube search <query>
   lighttube feed
@@ -54,6 +55,9 @@ func main() {
 func run(args []string) error {
 	var debug bool
 	var search string
+	var externalPlayer bool
+	var debugPlay string
+	var debugPlaySeconds int
 	var filtered []string
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -61,8 +65,22 @@ func run(args []string) error {
 			debug = true
 			continue
 		}
+		if arg == "--external-player" {
+			externalPlayer = true
+			continue
+		}
 		if arg == "--search" && i+1 < len(args) {
 			search = args[i+1]
+			i++
+			continue
+		}
+		if arg == "--debug-play" && i+1 < len(args) {
+			debugPlay = args[i+1]
+			i++
+			continue
+		}
+		if arg == "--debug-play-seconds" && i+1 < len(args) {
+			debugPlaySeconds, _ = strconv.Atoi(args[i+1])
 			i++
 			continue
 		}
@@ -84,17 +102,20 @@ func run(args []string) error {
 			stdin:    os.Stdin,
 			guiRunner: func(e *appEnv) error {
 				return ui.Run(ui.Options{
-					YTClient:  e.ytClient,
-					Store:     e.store,
-					Player:    player.New(),
-					Thumbs:    thumbs.New(),
-					Debug:     debug,
-					StartTime: processStart,
-					Search:    search,
+					YTClient:         e.ytClient,
+					Store:            e.store,
+					Player:           player.New(),
+					Thumbs:           thumbs.New(),
+					Debug:            debug,
+					StartTime:        processStart,
+					Search:           search,
+					ExternalPlayer:   externalPlayer,
+					DebugPlay:        debugPlay,
+					DebugPlaySeconds: debugPlaySeconds,
 				})
 			},
 		}
-		return runWithEnv(env, args)
+		return runWithEnv(env, filtered)
 	}
 
 	st, err := store.New()
@@ -110,7 +131,7 @@ func run(args []string) error {
 		stdin:    os.Stdin,
 	}
 
-	return runWithEnv(env, args)
+	return runWithEnv(env, filtered)
 }
 
 func runWithEnv(env *appEnv, args []string) error {

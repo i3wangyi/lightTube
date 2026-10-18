@@ -191,3 +191,87 @@ func TestResolveKeyAction(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveWatchKeyAction(t *testing.T) {
+	tests := []struct {
+		name            string
+		keyName         key.Name
+		mods            key.Modifiers
+		isEditorFocused bool
+		expectedAction  KeyAction
+		expectedDelta   int
+	}{
+		{
+			name:           "Space pauses/resumes",
+			keyName:        " ",
+			expectedAction: ActionWatchTogglePause,
+		},
+		{
+			name:           "K pauses/resumes",
+			keyName:        "K",
+			expectedAction: ActionWatchTogglePause,
+		},
+		{
+			name:           "J seeks -10s",
+			keyName:        "j",
+			expectedAction: ActionWatchSeek,
+			expectedDelta:  -10,
+		},
+		{
+			name:           "L seeks +10s",
+			keyName:        "L",
+			expectedAction: ActionWatchSeek,
+			expectedDelta:  10,
+		},
+		{
+			name:           "Left arrow seeks -5s",
+			keyName:        key.NameLeftArrow,
+			expectedAction: ActionWatchSeek,
+			expectedDelta:  -5,
+		},
+		{
+			name:           "Right arrow seeks +5s",
+			keyName:        key.NameRightArrow,
+			expectedAction: ActionWatchSeek,
+			expectedDelta:  5,
+		},
+		{
+			name:           "M mutes",
+			keyName:        "M",
+			expectedAction: ActionWatchToggleMute,
+		},
+		{
+			name:           "F toggles fullscreen",
+			keyName:        "f",
+			expectedAction: ActionWatchToggleFullscreen,
+		},
+		{
+			name:           "Escape backs out",
+			keyName:        key.NameEscape,
+			expectedAction: ActionWatchBack,
+		},
+		{
+			name:           "O opens external mpv",
+			keyName:        "o",
+			expectedAction: ActionWatchExternalMPV,
+		},
+		{
+			name:            "Keys ignored when editor is focused",
+			keyName:         "f",
+			isEditorFocused: true,
+			expectedAction:  ActionNone,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			action, _, delta := ResolveWatchKeyAction(tc.keyName, tc.mods, tc.isEditorFocused)
+			if action != tc.expectedAction {
+				t.Errorf("expected action %v, got %v", tc.expectedAction, action)
+			}
+			if delta != tc.expectedDelta {
+				t.Errorf("expected delta %d, got %d", tc.expectedDelta, delta)
+			}
+		})
+	}
+}

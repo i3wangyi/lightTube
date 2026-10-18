@@ -15,6 +15,7 @@ const (
 	TabWatchLater
 	TabHistory
 	TabSearch
+	TabWatch
 )
 
 func (t Tab) String() string {
@@ -29,6 +30,8 @@ func (t Tab) String() string {
 		return "History"
 	case TabSearch:
 		return "Search"
+	case TabWatch:
+		return "Watch"
 	default:
 		return "Home"
 	}
@@ -46,6 +49,12 @@ const (
 	ActionPasteURL
 	ActionSwitchTab
 	ActionMoveSelection
+	ActionWatchTogglePause
+	ActionWatchSeek
+	ActionWatchToggleMute
+	ActionWatchToggleFullscreen
+	ActionWatchBack
+	ActionWatchExternalMPV
 )
 
 // ResolveKeyAction determines the high-level UI action for a key press event.
@@ -97,14 +106,66 @@ func ResolveKeyAction(name key.Name, mods key.Modifiers, isEditorFocused bool) (
 	return ActionNone, 0, 0
 }
 
+// ResolveWatchKeyAction handles keyboard shortcuts specific to the watch page.
+func ResolveWatchKeyAction(name key.Name, mods key.Modifiers, isEditorFocused bool) (KeyAction, Tab, int) {
+	if mods.Contain(key.ModCtrl) {
+		switch name {
+		case "1":
+			return ActionSwitchTab, TabHome, 0
+		case "2":
+			return ActionSwitchTab, TabSubscriptions, 0
+		case "3":
+			return ActionSwitchTab, TabWatchLater, 0
+		case "4":
+			return ActionSwitchTab, TabHistory, 0
+		case "L", "l":
+			return ActionFocusSearch, 0, 0
+		case "V", "v":
+			if !isEditorFocused {
+				return ActionPasteURL, 0, 0
+			}
+		}
+	}
+
+	if isEditorFocused {
+		return ActionNone, 0, 0
+	}
+
+	switch name {
+	case " ", "K", "k":
+		return ActionWatchTogglePause, 0, 0
+	case "J", "j":
+		return ActionWatchSeek, 0, -10
+	case "L", "l":
+		return ActionWatchSeek, 0, 10
+	case key.NameLeftArrow:
+		return ActionWatchSeek, 0, -5
+	case key.NameRightArrow:
+		return ActionWatchSeek, 0, 5
+	case "M", "m":
+		return ActionWatchToggleMute, 0, 0
+	case "F", "f":
+		return ActionWatchToggleFullscreen, 0, 0
+	case key.NameEscape:
+		return ActionWatchBack, 0, 0
+	case "O", "o":
+		return ActionWatchExternalMPV, 0, 0
+	}
+
+	return ActionNone, 0, 0
+}
+
 // State manages UI navigation, selection, and current item lists.
 type State struct {
 	CurrentTab          Tab
+	PreviousTab         Tab
 	Videos              []yt.Video
 	SelectedIndex       int
 	Subscriptions       []yt.Subscription
 	ActiveChannelFilter string
 	Status              string
+	WatchVideo          yt.Video
+	UpNextVideos        []yt.Video
 }
 
 // NewState creates an initial UI state with Home as the default view.

@@ -69,6 +69,13 @@ func NewDeferred(dir string) (*Store, error) {
 	}, nil
 }
 
+// DataDir returns the data directory used by the store.
+func (s *Store) DataDir() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.dir
+}
+
 // LoadAll reads subscriptions, watch later, and playback history from disk.
 func (s *Store) LoadAll() error {
 	s.mu.Lock()

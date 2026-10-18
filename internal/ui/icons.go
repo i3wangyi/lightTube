@@ -256,3 +256,166 @@ func drawHistoryIcon(gtx layout.Context, bounds image.Rectangle, col color.NRGBA
 		Width: strokeW,
 	}.Op())
 }
+
+// drawPlayPauseIcon draws either play triangle or pause bars.
+func drawPlayPauseIcon(gtx layout.Context, bounds image.Rectangle, col color.NRGBA, paused bool) {
+	if paused {
+		drawPlayTriangle(gtx, bounds, col)
+		return
+	}
+	cx := float32(bounds.Min.X + bounds.Dx()/2)
+	cy := float32(bounds.Min.Y + bounds.Dy()/2)
+	barW := float32(gtx.Dp(3))
+	barH := float32(gtx.Dp(10))
+	gap := float32(gtx.Dp(2.5))
+
+	r1 := image.Rect(int(cx-gap-barW), int(cy-barH/2), int(cx-gap), int(cy+barH/2))
+	r2 := image.Rect(int(cx+gap), int(cy-barH/2), int(cx+gap+barW), int(cy+barH/2))
+	paint.FillShape(gtx.Ops, col, clip.UniformRRect(r1, gtx.Dp(1)).Op(gtx.Ops))
+	paint.FillShape(gtx.Ops, col, clip.UniformRRect(r2, gtx.Dp(1)).Op(gtx.Ops))
+}
+
+// drawSpeakerIcon draws a speaker cone, with waves or slash if muted.
+func drawSpeakerIcon(gtx layout.Context, bounds image.Rectangle, col color.NRGBA, muted bool) {
+	cx := float32(bounds.Min.X + bounds.Dx()/2)
+	cy := float32(bounds.Min.Y + bounds.Dy()/2)
+	scale := float32(bounds.Dx()) / 24.0
+
+	// Speaker body
+	var p clip.Path
+	p.Begin(gtx.Ops)
+	p.MoveTo(f32.Pt(cx-6*scale, cy-3*scale))
+	p.LineTo(f32.Pt(cx-3*scale, cy-3*scale))
+	p.LineTo(f32.Pt(cx+1*scale, cy-7*scale))
+	p.LineTo(f32.Pt(cx+1*scale, cy+7*scale))
+	p.LineTo(f32.Pt(cx-3*scale, cy+3*scale))
+	p.LineTo(f32.Pt(cx-6*scale, cy+3*scale))
+	p.Close()
+	paint.FillShape(gtx.Ops, col, clip.Outline{Path: p.End()}.Op())
+
+	if muted {
+		// Mute X mark
+		var x clip.Path
+		x.Begin(gtx.Ops)
+		x.MoveTo(f32.Pt(cx+3.5*scale, cy-3*scale))
+		x.LineTo(f32.Pt(cx+7.5*scale, cy+3*scale))
+		x.MoveTo(f32.Pt(cx+7.5*scale, cy-3*scale))
+		x.LineTo(f32.Pt(cx+3.5*scale, cy+3*scale))
+		paint.FillShape(gtx.Ops, col, clip.Stroke{Path: x.End(), Width: 1.8 * scale}.Op())
+	} else {
+		// Sound wave arc
+		var w clip.Path
+		w.Begin(gtx.Ops)
+		w.MoveTo(f32.Pt(cx+4*scale, cy-4*scale))
+		w.QuadTo(f32.Pt(cx+7*scale, cy), f32.Pt(cx+4*scale, cy+4*scale))
+		paint.FillShape(gtx.Ops, col, clip.Stroke{Path: w.End(), Width: 1.8 * scale}.Op())
+	}
+}
+
+// drawFullscreenIcon draws a 4-corner fullscreen bracket icon.
+func drawFullscreenIcon(gtx layout.Context, bounds image.Rectangle, col color.NRGBA, isFullscreen bool) {
+	minX := float32(bounds.Min.X)
+	minY := float32(bounds.Min.Y)
+	scale := float32(bounds.Dx()) / 24.0
+	arm := 4.0 * scale
+	strokeW := 1.8 * scale
+
+	x1, y1 := minX+4*scale, minY+4*scale
+	x2, y2 := minX+20*scale, minY+20*scale
+
+	var p clip.Path
+	p.Begin(gtx.Ops)
+	if !isFullscreen {
+		// Top-left
+		p.MoveTo(f32.Pt(x1, y1+arm))
+		p.LineTo(f32.Pt(x1, y1))
+		p.LineTo(f32.Pt(x1+arm, y1))
+		// Top-right
+		p.MoveTo(f32.Pt(x2-arm, y1))
+		p.LineTo(f32.Pt(x2, y1))
+		p.LineTo(f32.Pt(x2, y1+arm))
+		// Bottom-left
+		p.MoveTo(f32.Pt(x1, y2-arm))
+		p.LineTo(f32.Pt(x1, y2))
+		p.LineTo(f32.Pt(x1+arm, y2))
+		// Bottom-right
+		p.MoveTo(f32.Pt(x2-arm, y2))
+		p.LineTo(f32.Pt(x2, y2))
+		p.LineTo(f32.Pt(x2, y2-arm))
+	} else {
+		// Inwards corners when fullscreen
+		cx := minX + 12*scale
+		cy := minY + 12*scale
+		p.MoveTo(f32.Pt(cx-arm, cy-1*scale))
+		p.LineTo(f32.Pt(cx-arm, cy-arm))
+		p.LineTo(f32.Pt(cx-1*scale, cy-arm))
+
+		p.MoveTo(f32.Pt(cx+arm, cy-1*scale))
+		p.LineTo(f32.Pt(cx+arm, cy-arm))
+		p.LineTo(f32.Pt(cx+1*scale, cy-arm))
+
+		p.MoveTo(f32.Pt(cx-arm, cy+1*scale))
+		p.LineTo(f32.Pt(cx-arm, cy+arm))
+		p.LineTo(f32.Pt(cx-1*scale, cy+arm))
+
+		p.MoveTo(f32.Pt(cx+arm, cy+1*scale))
+		p.LineTo(f32.Pt(cx+arm, cy+arm))
+		p.LineTo(f32.Pt(cx+1*scale, cy+arm))
+	}
+	paint.FillShape(gtx.Ops, col, clip.Stroke{Path: p.End(), Width: strokeW}.Op())
+}
+
+// drawSkipPrevIcon draws a previous track glyph (|◀).
+func drawSkipPrevIcon(gtx layout.Context, bounds image.Rectangle, col color.NRGBA) {
+	cx := float32(bounds.Min.X + bounds.Dx()/2)
+	cy := float32(bounds.Min.Y + bounds.Dy()/2)
+	scale := float32(bounds.Dx()) / 24.0
+
+	// Bar
+	barRect := image.Rect(int(cx-5*scale), int(cy-5*scale), int(cx-3.5*scale), int(cy+5*scale))
+	paint.FillShape(gtx.Ops, col, clip.Rect(barRect).Op())
+
+	// Triangle pointing left
+	var p clip.Path
+	p.Begin(gtx.Ops)
+	p.MoveTo(f32.Pt(cx+4*scale, cy-5*scale))
+	p.LineTo(f32.Pt(cx+4*scale, cy+5*scale))
+	p.LineTo(f32.Pt(cx-3*scale, cy))
+	p.Close()
+	paint.FillShape(gtx.Ops, col, clip.Outline{Path: p.End()}.Op())
+}
+
+// drawSkipNextIcon draws a next track glyph (▶|).
+func drawSkipNextIcon(gtx layout.Context, bounds image.Rectangle, col color.NRGBA) {
+	cx := float32(bounds.Min.X + bounds.Dx()/2)
+	cy := float32(bounds.Min.Y + bounds.Dy()/2)
+	scale := float32(bounds.Dx()) / 24.0
+
+	// Triangle pointing right
+	var p clip.Path
+	p.Begin(gtx.Ops)
+	p.MoveTo(f32.Pt(cx-4*scale, cy-5*scale))
+	p.LineTo(f32.Pt(cx-4*scale, cy+5*scale))
+	p.LineTo(f32.Pt(cx+3*scale, cy))
+	p.Close()
+	paint.FillShape(gtx.Ops, col, clip.Outline{Path: p.End()}.Op())
+
+	// Bar
+	barRect := image.Rect(int(cx+3.5*scale), int(cy-5*scale), int(cx+5*scale), int(cy+5*scale))
+	paint.FillShape(gtx.Ops, col, clip.Rect(barRect).Op())
+}
+
+// drawClearXIcon draws a small 'x' icon.
+func drawClearXIcon(gtx layout.Context, bounds image.Rectangle, col color.NRGBA) {
+	cx := float32(bounds.Min.X + bounds.Dx()/2)
+	cy := float32(bounds.Min.Y + bounds.Dy()/2)
+	r := float32(gtx.Dp(4))
+
+	var p clip.Path
+	p.Begin(gtx.Ops)
+	p.MoveTo(f32.Pt(cx-r, cy-r))
+	p.LineTo(f32.Pt(cx+r, cy+r))
+	p.MoveTo(f32.Pt(cx+r, cy-r))
+	p.LineTo(f32.Pt(cx-r, cy+r))
+	paint.FillShape(gtx.Ops, col, clip.Stroke{Path: p.End(), Width: float32(gtx.Dp(1.5))}.Op())
+}

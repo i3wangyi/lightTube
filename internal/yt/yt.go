@@ -22,6 +22,7 @@ type Video struct {
 	UploadDate  string    `json:"upload_date,omitempty"`
 	PublishedAt time.Time `json:"published_at,omitempty"`
 	URL         string    `json:"url,omitempty"`
+	Description string    `json:"description,omitempty"`
 }
 
 // WatchURL returns the standard watch URL for the video.

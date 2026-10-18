@@ -57,7 +57,8 @@ type atomAuthor struct {
 }
 
 type atomMedia struct {
-	Community atomCommunity `xml:"community"`
+	Description string        `xml:"description"`
+	Community   atomCommunity `xml:"community"`
 }
 
 type atomCommunity struct {
@@ -121,6 +122,7 @@ func ParseFeedXML(data []byte) ([]Video, error) {
 			ViewCount:   entry.Media.Community.Statistics.Views,
 			PublishedAt: pubTime,
 			URL:         href,
+			Description: strings.TrimSpace(entry.Media.Description),
 		})
 	}
 

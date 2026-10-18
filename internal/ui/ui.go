@@ -7,6 +7,9 @@ import (
 	"image/color"
 	"io"
 	"os"
+	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +29,7 @@ import (
 	"gioui.org/widget"
 	"gioui.org/widget/material"
 
+	"lighttube/internal/embed"
 	"lighttube/internal/player"
 	"lighttube/internal/store"
 	"lighttube/internal/thumbs"
@@ -34,14 +38,17 @@ import (
 
 // Options holds runtime dependencies injected into the UI.
 type Options struct {
-	YTClient  *yt.Client
-	Store     *store.Store
-	Player    *player.Player
-	Thumbs    *thumbs.Manager
-	Window    *app.Window
-	Debug     bool
-	StartTime time.Time
-	Search    string
+	YTClient         *yt.Client
+	Store            *store.Store
+	Player           *player.Player
+	Thumbs           *thumbs.Manager
+	Window           *app.Window
+	Debug            bool
+	StartTime        time.Time
+	Search           string
+	ExternalPlayer   bool
+	DebugPlay        string
+	DebugPlaySeconds int
 }
 
 // UI manages the Gio window, layout, and event interactions.
@@ -64,6 +71,44 @@ type UI struct {
 	initialSearch    string
 	firstFrameLogged bool
 	dataLoaded       bool
+
+	// Options & flags
+	externalPlayer     bool
+	debugPlay          string
+	debugPlaySeconds   int
+	debugPlayTriggered bool
+
+	// Embedded player & wayland view
+	waylandView  app.WaylandViewEvent
+	embedPlayer  *embed.Player
+	currentScale int
+	hwdecLogged  bool
+	lastTimePoll time.Time
+	previousTab  Tab
+
+	// Watch page state & controls
+	watchVideo            yt.Video
+	upNextVideos          []yt.Video
+	watchPaused           bool
+	watchMuted            bool
+	watchVolume           float64
+	watchCurrentTime      float64
+	watchDuration         float64
+	watchFullscreen       bool
+	watchLastMouseMove    time.Time
+	lastVideoClickTime    time.Time
+	watchPlayPauseClick   widget.Clickable
+	watchMuteClick        widget.Clickable
+	watchFullscreenClick  widget.Clickable
+	watchExternalMPVClick widget.Clickable
+	watchSubscribeClick   widget.Clickable
+	watchLaterClick       widget.Clickable
+	watchVideoTag         event.Tag
+	watchProgressTag      event.Tag
+	watchList             layout.List
+	upNextList            layout.List
+	upNextClicks          []widget.Clickable
+	searchClearClick      widget.Clickable
 
 	actionsMu sync.Mutex
 	actions   []func()
@@ -132,23 +177,29 @@ func New(opts Options) *UI {
 	th, colors := NewDarkTheme()
 
 	ui := &UI{
-		ytClient:      ytClient,
-		store:         st,
-		player:        p,
-		thumbs:        thMgr,
-		window:        opts.Window,
-		th:            th,
-		colors:        colors,
-		state:         NewState(),
-		power:         player.DetectPower(),
-		mode:          player.ModeVideo,
-		debug:         opts.Debug,
-		startTime:     opts.StartTime,
-		initialSearch: opts.Search,
-		requested:     make(map[string]bool),
-		imageOps:      make(map[string]paint.ImageOp),
-		windowTag:     new(int),
-		pasteTag:      new(int),
+		ytClient:           ytClient,
+		store:              st,
+		player:             p,
+		thumbs:             thMgr,
+		window:             opts.Window,
+		th:                 th,
+		colors:             colors,
+		state:              NewState(),
+		power:              player.DetectPower(),
+		mode:               player.ModeVideo,
+		debug:              opts.Debug,
+		startTime:          opts.StartTime,
+		initialSearch:      opts.Search,
+		externalPlayer:     opts.ExternalPlayer,
+		debugPlay:          opts.DebugPlay,
+		debugPlaySeconds:   opts.DebugPlaySeconds,
+		watchLastMouseMove: time.Now(),
+		watchVolume:        100,
+		currentScale:       2,
+		requested:          make(map[string]bool),
+		imageOps:           make(map[string]paint.ImageOp),
+		windowTag:          new(int),
+		pasteTag:           new(int),
 	}
 
 	ui.searchEditor.SingleLine = true
@@ -167,6 +218,8 @@ func New(opts Options) *UI {
 	ui.gridList.Axis = layout.Vertical
 	ui.searchList.Axis = layout.Vertical
 	ui.subList.Axis = layout.Vertical
+	ui.watchList.Axis = layout.Vertical
+	ui.upNextList.Axis = layout.Vertical
 
 	return ui
 }
@@ -219,12 +272,36 @@ func (ui *UI) eventLoop() error {
 	for {
 		e := ui.window.Event()
 		switch e := e.(type) {
+		case *app.ClosingEvent:
+			if ui.embedPlayer != nil {
+				ui.embedPlayer.Stop()
+				ui.embedPlayer.Close()
+				ui.embedPlayer = nil
+			}
+
 		case app.DestroyEvent:
+			if ui.embedPlayer != nil {
+				ui.embedPlayer.Stop()
+				ui.embedPlayer.Close()
+				ui.embedPlayer = nil
+			}
 			if e.Err != nil {
-				return e.Err
+				os.Exit(1)
 			}
 			os.Exit(0)
 			return nil
+
+		case app.WaylandViewEvent:
+			if e.Valid() {
+				ui.waylandView = e
+			} else {
+				if ui.embedPlayer != nil {
+					ui.embedPlayer.Stop()
+					ui.embedPlayer.Close()
+					ui.embedPlayer = nil
+				}
+				ui.waylandView = app.WaylandViewEvent{}
+			}
 
 		case app.ConfigEvent:
 			if e.Config.Focused {
@@ -232,6 +309,11 @@ func (ui *UI) eventLoop() error {
 			}
 
 		case app.FrameEvent:
+			ui.currentScale = int(e.Metric.PxPerDp)
+			if ui.currentScale <= 0 {
+				ui.currentScale = 2
+			}
+
 			// Log startup ms to first FrameEvent if --debug is enabled.
 			if ui.debug && !ui.firstFrameLogged {
 				ui.firstFrameLogged = true
@@ -251,14 +333,61 @@ func (ui *UI) eventLoop() error {
 						if ui.initialSearch != "" {
 							ui.search(ui.initialSearch)
 						}
+						if ui.debugPlay != "" && !ui.debugPlayTriggered {
+							ui.debugPlayTriggered = true
+							go func() {
+								time.Sleep(6 * time.Second)
+								ui.sendAction(func() {
+									ui.triggerDebugPlay(ui.debugPlay, ui.debugPlaySeconds)
+								})
+								ui.window.Invalidate()
+							}()
+						}
 					})
 					ui.window.Invalidate()
 				}()
 			}
 
+			// Poll mpv status at most 4 times a second, and only while playing and window visible
+			if ui.state.CurrentTab == TabWatch && ui.embedPlayer != nil {
+				if time.Since(ui.lastTimePoll) >= 250*time.Millisecond {
+					ui.lastTimePoll = time.Now()
+					st := ui.embedPlayer.Status()
+					ui.watchCurrentTime = st.TimePos
+					if st.Duration > 0 {
+						ui.watchDuration = st.Duration
+					}
+					ui.watchPaused = st.Paused
+					ui.watchMuted = st.Muted
+					ui.watchVolume = st.Volume
+					if ui.debug && !ui.hwdecLogged && st.HWDecCurrent != "" && st.HWDecCurrent != "no" {
+						ui.hwdecLogged = true
+						fmt.Fprintf(os.Stderr, "hwdec-current=%s\n", st.HWDecCurrent)
+						if ui.debugPlaySeconds > 0 {
+							go func() {
+								time.Sleep(time.Duration(ui.debugPlaySeconds) * time.Second)
+								ui.sendAction(func() {
+									ui.closeWatchPage()
+								})
+								ui.window.Invalidate()
+							}()
+						}
+					}
+				}
+			}
+
 			ui.drainActions()
 			gtx := app.NewContext(&ops, e)
 			ui.layout(gtx)
+
+			// Invalidate for next timer tick when playing
+			if ui.state.CurrentTab == TabWatch && !ui.watchPaused {
+				gtx.Execute(op.InvalidateCmd{At: gtx.Now.Add(250 * time.Millisecond)})
+			}
+			if ui.state.CurrentTab == TabWatch && ui.watchFullscreen && time.Since(ui.watchLastMouseMove) < 3*time.Second {
+				gtx.Execute(op.InvalidateCmd{At: ui.watchLastMouseMove.Add(3 * time.Second)})
+			}
+
 			e.Frame(gtx.Ops)
 		}
 	}
@@ -269,6 +398,8 @@ func (ui *UI) onStoreLoaded() {
 	if ui.state.CurrentTab == TabHome {
 		ui.loadMergedFeed()
 	}
+	runtime.GC()
+	debug.FreeOSMemory()
 }
 
 func (ui *UI) updatePower() {
@@ -369,6 +500,17 @@ func (ui *UI) loadMergedFeed() {
 			}
 			ui.state.SetVideos(videos)
 			ui.state.Status = ""
+			if ui.state.CurrentTab == TabWatch && len(ui.upNextVideos) == 0 {
+				upNext := make([]yt.Video, 0, len(videos))
+				for _, item := range videos {
+					if item.ID != ui.watchVideo.ID {
+						upNext = append(upNext, item)
+					} else if ui.watchVideo.Title == "Test Video" {
+						ui.watchVideo = item
+					}
+				}
+				ui.upNextVideos = upNext
+			}
 		})
 		ui.window.Invalidate()
 	}()
@@ -477,6 +619,14 @@ func (ui *UI) playSelected(audio bool) {
 }
 
 func (ui *UI) playVideo(v yt.Video, audio bool) {
+	if audio || ui.externalPlayer {
+		ui.playVideoExternal(v, audio)
+		return
+	}
+	ui.openWatchPage(v)
+}
+
+func (ui *UI) playVideoExternal(v yt.Video, audio bool) {
 	ui.mode = player.ModeVideo
 	if audio {
 		ui.mode = player.ModeAudio
@@ -487,7 +637,7 @@ func (ui *UI) playVideo(v yt.Video, audio bool) {
 	if audio {
 		modeText = "audio"
 	}
-	ui.state.Status = fmt.Sprintf("Playing %s: %s", modeText, v.Title)
+	ui.state.Status = fmt.Sprintf("Playing %s (external mpv): %s", modeText, v.Title)
 
 	_ = ui.store.AddHistory(v)
 	if ui.state.CurrentTab == TabHistory {
@@ -618,6 +768,20 @@ func (ui *UI) layout(gtx layout.Context) layout.Dimensions {
 			key.Filter{Name: "a"},
 			key.Filter{Name: "W"},
 			key.Filter{Name: "w"},
+			key.Filter{Name: " "},
+			key.Filter{Name: "K"},
+			key.Filter{Name: "k"},
+			key.Filter{Name: "J"},
+			key.Filter{Name: "j"},
+			key.Filter{Name: "L"},
+			key.Filter{Name: "l"},
+			key.Filter{Name: "M"},
+			key.Filter{Name: "m"},
+			key.Filter{Name: "F"},
+			key.Filter{Name: "f"},
+			key.Filter{Name: key.NameEscape},
+			key.Filter{Name: "O"},
+			key.Filter{Name: "o"},
 		)
 		if !ok {
 			break
@@ -625,23 +789,60 @@ func (ui *UI) layout(gtx layout.Context) layout.Dimensions {
 
 		if ke, ok := evt.(key.Event); ok && ke.State == key.Press {
 			isEditorFocused := gtx.Focused(&ui.searchEditor) || gtx.Focused(&ui.addChannelEditor) || gtx.Focused(&ui.csvPathEditor)
-			action, tab, delta := ResolveKeyAction(ke.Name, ke.Modifiers, isEditorFocused)
-			switch action {
-			case ActionSwitchTab:
-				ui.switchTab(tab)
-			case ActionFocusSearch:
-				gtx.Execute(key.FocusCmd{Tag: &ui.searchEditor})
-			case ActionPasteURL:
-				gtx.Execute(clipboard.ReadCmd{Tag: ui.pasteTag})
-			case ActionMoveSelection:
-				ui.state.MoveSelection(delta)
-			case ActionPlay:
-				ui.playSelected(false)
-			case ActionPlayAudio:
-				ui.playSelected(true)
-			case ActionToggleWatchLater:
-				if v, ok := ui.state.SelectedVideo(); ok {
-					ui.toggleWatchLater(v)
+			if ui.state.CurrentTab == TabWatch {
+				action, tab, delta := ResolveWatchKeyAction(ke.Name, ke.Modifiers, isEditorFocused)
+				switch action {
+				case ActionSwitchTab:
+					ui.closeWatchPage()
+					ui.switchTab(tab)
+				case ActionFocusSearch:
+					gtx.Execute(key.FocusCmd{Tag: &ui.searchEditor})
+				case ActionPasteURL:
+					gtx.Execute(clipboard.ReadCmd{Tag: ui.pasteTag})
+				case ActionWatchTogglePause:
+					if ui.embedPlayer != nil {
+						ui.embedPlayer.TogglePause()
+					}
+				case ActionWatchSeek:
+					if ui.embedPlayer != nil {
+						ui.embedPlayer.Seek(float64(delta), true)
+					}
+				case ActionWatchToggleMute:
+					if ui.embedPlayer != nil {
+						ui.embedPlayer.ToggleMute()
+					}
+				case ActionWatchToggleFullscreen:
+					ui.toggleFullscreen()
+				case ActionWatchBack:
+					if ui.watchFullscreen {
+						ui.setFullscreen(false)
+					} else {
+						ui.closeWatchPage()
+					}
+				case ActionWatchExternalMPV:
+					vid := ui.watchVideo
+					ui.closeWatchPage()
+					ui.playVideoExternal(vid, false)
+				}
+			} else {
+				action, tab, delta := ResolveKeyAction(ke.Name, ke.Modifiers, isEditorFocused)
+				switch action {
+				case ActionSwitchTab:
+					ui.switchTab(tab)
+				case ActionFocusSearch:
+					gtx.Execute(key.FocusCmd{Tag: &ui.searchEditor})
+				case ActionPasteURL:
+					gtx.Execute(clipboard.ReadCmd{Tag: ui.pasteTag})
+				case ActionMoveSelection:
+					ui.state.MoveSelection(delta)
+				case ActionPlay:
+					ui.playSelected(false)
+				case ActionPlayAudio:
+					ui.playSelected(true)
+				case ActionToggleWatchLater:
+					if v, ok := ui.state.SelectedVideo(); ok {
+						ui.toggleWatchLater(v)
+					}
 				}
 			}
 		}
@@ -649,6 +850,17 @@ func (ui *UI) layout(gtx layout.Context) layout.Dimensions {
 
 	// Paint bg itself (opaque), so it does not depend on compositor background.
 	paint.FillShape(gtx.Ops, ui.colors.Bg, clip.Rect{Max: gtx.Constraints.Max}.Op())
+
+	if ui.state.CurrentTab == TabWatch {
+		if ui.watchFullscreen {
+			return ui.layoutWatchPage(gtx)
+		}
+		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+			layout.Rigid(ui.layoutTopBar),
+			layout.Flexed(1, ui.layoutWatchPage),
+			layout.Rigid(ui.layoutStatusBar),
+		)
+	}
 
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		layout.Rigid(ui.layoutTopBar),
@@ -664,7 +876,7 @@ func (ui *UI) layout(gtx layout.Context) layout.Dimensions {
 
 // layoutTopBar renders the 56dp high top bar matching DESIGN.md:
 // Left: Logo (28x20 red rounded rect with white triangle + 20sp medium "lightTube")
-// Center: Pill search box (max width 640, height 40, radius 20, 1dp border, magnifier button)
+// Center: Pill search box (centered in window width, max width 640, height 40, radius 20, 1dp border, magnifier button)
 // Right: Policy chip (surface bg, text2, 12sp)
 func (ui *UI) layoutTopBar(gtx layout.Context) layout.Dimensions {
 	// Check search editor submit.
@@ -680,9 +892,20 @@ func (ui *UI) layoutTopBar(gtx layout.Context) layout.Dimensions {
 	if ui.searchBtn.Clicked(gtx) {
 		ui.handleSearchSubmit()
 	}
-	if ui.logoClick.Clicked(gtx) {
-		ui.switchTab(TabHome)
+	if ui.searchClearClick.Clicked(gtx) {
+		ui.searchEditor.SetText("")
 	}
+	if ui.logoClick.Clicked(gtx) {
+		if ui.state.CurrentTab == TabWatch {
+			ui.closeWatchPage()
+		} else {
+			ui.switchTab(TabHome)
+		}
+	}
+
+	winW := gtx.Constraints.Max.X
+	h := gtx.Dp(40)
+	showChip := winW >= gtx.Dp(760)
 
 	return layout.Inset{
 		Left:   unit.Dp(16),
@@ -693,9 +916,8 @@ func (ui *UI) layoutTopBar(gtx layout.Context) layout.Dimensions {
 		return layout.Flex{
 			Axis:      layout.Horizontal,
 			Alignment: layout.Middle,
-			Spacing:   layout.SpaceBetween,
 		}.Layout(gtx,
-			// Left Logo
+			// 1. Logo rigid
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				return ui.logoClick.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 					if ui.logoClick.Hovered() {
@@ -704,12 +926,12 @@ func (ui *UI) layoutTopBar(gtx layout.Context) layout.Dimensions {
 					return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
 						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 							w := gtx.Dp(28)
-							h := gtx.Dp(20)
-							rect := image.Rect(0, 0, w, h)
+							lh := gtx.Dp(20)
+							rect := image.Rect(0, 0, w, lh)
 							rrect := clip.UniformRRect(rect, gtx.Dp(6))
 							paint.FillShape(gtx.Ops, ui.colors.Red, rrect.Op(gtx.Ops))
 							drawPlayTriangle(gtx, rect, color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff})
-							return layout.Dimensions{Size: image.Pt(w, h)}
+							return layout.Dimensions{Size: image.Pt(w, lh)}
 						}),
 						layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
 						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -722,89 +944,141 @@ func (ui *UI) layoutTopBar(gtx layout.Context) layout.Dimensions {
 				})
 			}),
 
-			// Center Pill Search Box (max width 640, height 40, radius 20)
+			layout.Rigid(layout.Spacer{Width: unit.Dp(16)}.Layout),
+
+			// 2. Search flexed (min 200, max 640, centered in free space)
 			layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+				freeW := gtx.Constraints.Max.X
+				minW := gtx.Dp(200)
+				maxW := gtx.Dp(640)
+				pillW := maxW
+				if freeW < pillW {
+					pillW = freeW
+				}
+				if pillW < minW {
+					pillW = minW
+				}
+				if pillW > freeW {
+					pillW = freeW
+				}
+
 				return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-					maxW := gtx.Dp(640)
-					if gtx.Constraints.Max.X < maxW {
-						maxW = gtx.Constraints.Max.X - gtx.Dp(32)
-					}
-					if maxW < gtx.Dp(200) {
-						maxW = gtx.Dp(200)
-					}
-					h := gtx.Dp(40)
-					gtx.Constraints.Min = image.Pt(maxW, h)
-					gtx.Constraints.Max = image.Pt(maxW, h)
-
-					radius := gtx.Dp(20)
-					pillRect := image.Rect(0, 0, maxW, h)
-					pillShape := clip.UniformRRect(pillRect, radius)
-
-					// Pill background
-					paint.FillShape(gtx.Ops, color.NRGBA{R: 0x12, G: 0x12, B: 0x12, A: 0xff}, pillShape.Op(gtx.Ops))
-
-					// Border (1dp border, focused #1c62b9)
-					borderColor := ui.colors.Border
-					if gtx.Focused(&ui.searchEditor) {
-						borderColor = ui.colors.BorderFocused
-					}
-					paint.FillShape(gtx.Ops, borderColor, clip.Stroke{
-						Path:  pillShape.Path(gtx.Ops),
-						Width: float32(gtx.Dp(1)),
-					}.Op())
-
-					// Inner layout: Editor on left + 64 wide button with magnifier glyph on right
-					return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
-						layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-							return layout.Inset{
-								Left:  unit.Dp(16),
-								Right: unit.Dp(8),
-							}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-								ed := material.Editor(ui.th, &ui.searchEditor, "Search")
-								ed.Color = ui.colors.Text
-								ed.HintColor = ui.colors.Text2
-								ed.TextSize = unit.Sp(15)
-								return ed.Layout(gtx)
-							})
-						}),
-						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-							btnW := gtx.Dp(64)
-							btnBox := image.Pt(btnW, h)
-							gtx.Constraints.Min = btnBox
-							gtx.Constraints.Max = btnBox
-
-							return ui.searchBtn.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-								if ui.searchBtn.Hovered() {
-									pointer.CursorPointer.Add(gtx.Ops)
-								}
-								// Surface background with rounded right edge
-								rRight := clip.RRect{
-									Rect: image.Rect(0, 0, btnW, h),
-									SE:   radius,
-									NE:   radius,
-								}
-								btnBg := ui.colors.Surface
-								if ui.searchBtn.Hovered() {
-									btnBg = ui.colors.SurfaceHover
-								}
-								paint.FillShape(gtx.Ops, btnBg, rRight.Op(gtx.Ops))
-
-								// Left divider inside pill
-								paint.FillShape(gtx.Ops, ui.colors.Border, clip.Rect(image.Rect(0, 0, gtx.Dp(1), h)).Op())
-
-								// Magnifier glyph
-								drawMagnifier(gtx, image.Rect(0, 0, btnW, h), ui.colors.Text)
-								return layout.Dimensions{Size: btnBox}
-							})
-						}),
-					)
+					return ui.layoutSearchBox(gtx, pillW, h)
 				})
 			}),
 
-			// Right Policy Chip (surface bg, text2, 12sp)
-			layout.Rigid(ui.layoutPolicyLabel),
+			// 3. Policy chip rigid (hidden when window < 760 dp)
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				if !showChip {
+					return layout.Dimensions{}
+				}
+				return layout.Inset{Left: unit.Dp(16)}.Layout(gtx, ui.layoutPolicyLabel)
+			}),
 		)
 	})
+}
+
+func (ui *UI) layoutSearchBox(gtx layout.Context, pillW, h int) layout.Dimensions {
+	gtx.Constraints.Min = image.Pt(pillW, h)
+	gtx.Constraints.Max = image.Pt(pillW, h)
+
+	radius := gtx.Dp(20)
+	btnW := gtx.Dp(64)
+	inputW := pillW - btnW
+	if inputW < gtx.Dp(100) {
+		inputW = gtx.Dp(100)
+	}
+
+	// 1. Input part: left side
+	inputRect := image.Rect(0, 0, inputW, h)
+	inputRRect := clip.RRect{
+		Rect: inputRect,
+		NW:   radius,
+		SW:   radius,
+	}
+	paint.FillShape(gtx.Ops, color.NRGBA{R: 0x12, G: 0x12, B: 0x12, A: 0xff}, inputRRect.Op(gtx.Ops))
+
+	borderColor := ui.colors.Border
+	if gtx.Focused(&ui.searchEditor) {
+		borderColor = ui.colors.BorderFocused
+	}
+	paint.FillShape(gtx.Ops, borderColor, clip.Stroke{
+		Path:  inputRRect.Path(gtx.Ops),
+		Width: float32(gtx.Dp(1)),
+	}.Op())
+
+	// 2. Button part: right side
+	btnRect := image.Rect(inputW, 0, pillW, h)
+	btnRRect := clip.RRect{
+		Rect: btnRect,
+		NE:   radius,
+		SE:   radius,
+	}
+	btnBg := ui.colors.Surface
+	if ui.searchBtn.Hovered() {
+		btnBg = ui.colors.SurfaceHover
+	}
+	paint.FillShape(gtx.Ops, btnBg, btnRRect.Op(gtx.Ops))
+	paint.FillShape(gtx.Ops, ui.colors.Border, clip.Stroke{
+		Path:  btnRRect.Path(gtx.Ops),
+		Width: float32(gtx.Dp(1)),
+	}.Op())
+
+	drawMagnifier(gtx, btnRect, ui.colors.Text)
+
+	// Button click registration
+	btnArea := clip.Rect(btnRect).Push(gtx.Ops)
+	ui.searchBtn.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		if ui.searchBtn.Hovered() {
+			pointer.CursorPointer.Add(gtx.Ops)
+		}
+		return layout.Dimensions{Size: btnRect.Size()}
+	})
+	btnArea.Pop()
+
+	// Input content
+	inputArea := clip.Rect(inputRect).Push(gtx.Ops)
+	hasText := ui.searchEditor.Text() != ""
+
+	inputGtx := gtx
+	inputGtx.Constraints = layout.Exact(image.Pt(inputW, h))
+	layout.Center.Layout(inputGtx, func(gtx layout.Context) layout.Dimensions {
+		gtx.Constraints.Min.Y = 0
+		gtx.Constraints.Max.Y = h
+		return layout.Inset{
+			Left:  unit.Dp(16),
+			Right: unit.Dp(12),
+		}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{
+				Axis:      layout.Horizontal,
+				Alignment: layout.Middle,
+			}.Layout(gtx,
+				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+					ed := material.Editor(ui.th, &ui.searchEditor, "Search")
+					ed.Color = ui.colors.Text
+					ed.HintColor = ui.colors.Text2
+					ed.TextSize = unit.Sp(16)
+					return ed.Layout(gtx)
+				}),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					if !hasText {
+						return layout.Dimensions{}
+					}
+					return ui.searchClearClick.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						if ui.searchClearClick.Hovered() {
+							pointer.CursorPointer.Add(gtx.Ops)
+						}
+						sz := gtx.Dp(20)
+						drawClearXIcon(gtx, image.Rect(0, 0, sz, sz), ui.colors.Text2)
+						return layout.Dimensions{Size: image.Pt(sz, sz)}
+					})
+				}),
+			)
+		})
+	})
+	inputArea.Pop()
+
+	return layout.Dimensions{Size: image.Pt(pillW, h)}
 }
 
 func (ui *UI) layoutPolicyLabel(gtx layout.Context) layout.Dimensions {
@@ -1719,5 +1993,634 @@ func (ui *UI) layoutStatusBar(gtx layout.Context) layout.Dimensions {
 				return lbl.Layout(gtx)
 			})
 		},
+	)
+}
+
+func (ui *UI) isSubscribed(channelID string) bool {
+	for _, sub := range ui.state.Subscriptions {
+		if sub.ChannelID == channelID {
+			return true
+		}
+	}
+	return false
+}
+
+func (ui *UI) setFullscreen(fs bool) {
+	if ui.watchFullscreen == fs {
+		return
+	}
+	ui.watchFullscreen = fs
+	if fs {
+		ui.window.Option(app.Fullscreen.Option())
+	} else {
+		ui.window.Option(app.Windowed.Option())
+	}
+}
+
+func (ui *UI) toggleFullscreen() {
+	ui.setFullscreen(!ui.watchFullscreen)
+}
+
+func (ui *UI) openWatchPage(v yt.Video) {
+	ui.watchVideo = v
+	if ui.state.CurrentTab != TabWatch {
+		ui.previousTab = ui.state.CurrentTab
+	}
+	ui.state.CurrentTab = TabWatch
+
+	// Up next: list = current feed or search results, minus this video
+	upNext := make([]yt.Video, 0, len(ui.state.Videos))
+	for _, item := range ui.state.Videos {
+		if item.ID != v.ID {
+			upNext = append(upNext, item)
+		}
+	}
+	ui.upNextVideos = upNext
+
+	_ = ui.store.AddHistory(v)
+	ui.state.Status = ""
+
+	if ui.waylandView.Valid() {
+		if ui.embedPlayer == nil {
+			p, err := embed.New(ui.waylandView.Display, ui.waylandView.Surface)
+			if err != nil {
+				ui.state.Status = "Failed to create embed player: " + err.Error()
+				return
+			}
+			ui.embedPlayer = p
+		}
+
+		cookiePath := filepath.Join(ui.store.DataDir(), "cookies.txt")
+		if _, err := os.Stat(cookiePath); err != nil {
+			cookiePath = ""
+		}
+
+		scale := ui.currentScale
+		if scale <= 0 {
+			scale = 2
+		}
+
+		policy := player.Format(ui.power, player.ModeVideo)
+		err := ui.embedPlayer.Play(embed.PlayOptions{
+			URL:         v.WatchURL(),
+			Title:       v.Title,
+			YTDLFormat:  policy,
+			CookiesFile: cookiePath,
+			WidthPx:     1280,
+			HeightPx:    720,
+			Scale:       scale,
+			Debug:       ui.debug,
+		})
+		if err != nil {
+			ui.state.Status = "Playback error: " + err.Error()
+			return
+		}
+	}
+
+	ui.watchPaused = false
+	ui.watchCurrentTime = 0
+	ui.watchDuration = float64(v.Duration)
+	ui.watchLastMouseMove = time.Now()
+	ui.hwdecLogged = false
+	ui.lastTimePoll = time.Now()
+	ui.window.Invalidate()
+}
+
+func (ui *UI) closeWatchPage() {
+	if ui.embedPlayer != nil {
+		ui.embedPlayer.Stop()
+	}
+	if ui.watchFullscreen {
+		ui.setFullscreen(false)
+	}
+	ui.state.CurrentTab = ui.previousTab
+	if ui.state.CurrentTab == TabWatch {
+		ui.state.CurrentTab = TabHome
+	}
+	ui.upNextVideos = nil
+	ui.watchVideo = yt.Video{}
+	if ui.thumbs != nil {
+		ui.thumbs.Clear()
+	}
+	ui.imageOps = make(map[string]paint.ImageOp)
+	runtime.GC()
+	debug.FreeOSMemory()
+	if ui.debug {
+		fmt.Fprintf(os.Stderr, "watch page closed\n")
+	}
+	ui.window.Invalidate()
+}
+
+func (ui *UI) triggerDebugPlay(urlStr string, playSeconds int) {
+	id, err := yt.ExtractVideoID(urlStr)
+	v := yt.Video{
+		ID:    id,
+		Title: "Test Video",
+		URL:   urlStr,
+	}
+	if err == nil {
+		for _, vid := range ui.state.Videos {
+			if vid.ID == id {
+				v = vid
+				break
+			}
+		}
+	}
+
+	ui.openWatchPage(v)
+}
+
+func (ui *UI) layoutWatchPage(gtx layout.Context) layout.Dimensions {
+	scale := ui.currentScale
+	if scale <= 0 {
+		scale = 2
+	}
+
+	// 1. Fullscreen layout
+	if ui.watchFullscreen {
+		winW := gtx.Constraints.Max.X
+		winH := gtx.Constraints.Max.Y
+		showControls := time.Since(ui.watchLastMouseMove) < 3*time.Second
+
+		controlsH := gtx.Dp(48)
+		videoH := winH
+		if showControls {
+			videoH = winH - controlsH
+		}
+
+		if ui.embedPlayer != nil {
+			ui.embedPlayer.SetRect(image.Rect(0, 0, winW, videoH), scale)
+		}
+
+		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				return ui.layoutVideoArea(gtx, winW, videoH)
+			}),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				if !showControls {
+					return layout.Dimensions{}
+				}
+				return ui.layoutControlsBar(gtx, winW)
+			}),
+		)
+	}
+
+	// 2. Windowed layout
+	availW := gtx.Constraints.Max.X
+	isWide := availW >= gtx.Dp(1000)
+
+	upNextW := gtx.Dp(402)
+	var colW int
+	if isWide {
+		colW = availW - gtx.Dp(24) - upNextW - gtx.Dp(32)
+	} else {
+		colW = availW - gtx.Dp(32)
+	}
+
+	videoW := colW
+	if videoW < gtx.Dp(200) {
+		videoW = gtx.Dp(200)
+	}
+	videoH := videoW * 9 / 16
+
+	// Video rect in window DIPs:
+	// Inset: Left 16dp, Top 56dp (top bar) + 16dp = 72dp
+	videoX := gtx.Dp(16)
+	videoY := gtx.Dp(56) + gtx.Dp(16)
+
+	if ui.embedPlayer != nil {
+		ui.embedPlayer.SetRect(image.Rect(videoX, videoY, videoX+videoW, videoY+videoH), scale)
+	}
+
+	return layout.Inset{
+		Left:   unit.Dp(16),
+		Right:  unit.Dp(16),
+		Top:    unit.Dp(16),
+		Bottom: unit.Dp(16),
+	}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		if isWide {
+			return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
+				// Left video column
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					gtx.Constraints.Min.X = videoW
+					gtx.Constraints.Max.X = videoW
+					return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+						// Video area
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							return ui.layoutVideoArea(gtx, videoW, videoH)
+						}),
+						// Controls bar below video
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							return ui.layoutControlsBar(gtx, videoW)
+						}),
+						layout.Rigid(layout.Spacer{Height: unit.Dp(16)}.Layout),
+						// Video details (title, channel, description)
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							return ui.layoutVideoDetails(gtx, ui.watchVideo, videoW)
+						}),
+					)
+				}),
+				layout.Rigid(layout.Spacer{Width: unit.Dp(24)}.Layout),
+				// Right Up next column
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return ui.layoutUpNextList(gtx, upNextW)
+				}),
+			)
+		}
+
+		// Narrow window (< 1000): Up next goes below description
+		return ui.watchList.Layout(gtx, 1, func(gtx layout.Context, _ int) layout.Dimensions {
+			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return ui.layoutVideoArea(gtx, videoW, videoH)
+				}),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return ui.layoutControlsBar(gtx, videoW)
+				}),
+				layout.Rigid(layout.Spacer{Height: unit.Dp(16)}.Layout),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return ui.layoutVideoDetails(gtx, ui.watchVideo, videoW)
+				}),
+				layout.Rigid(layout.Spacer{Height: unit.Dp(24)}.Layout),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return ui.layoutUpNextList(gtx, videoW)
+				}),
+			)
+		})
+	})
+}
+
+func (ui *UI) layoutVideoArea(gtx layout.Context, w, h int) layout.Dimensions {
+	box := image.Pt(w, h)
+	gtx.Constraints.Min = box
+	gtx.Constraints.Max = box
+
+	area := clip.Rect(image.Rect(0, 0, w, h)).Push(gtx.Ops)
+	event.Op(gtx.Ops, &ui.watchVideoTag)
+	area.Pop()
+
+	for {
+		ev, ok := gtx.Event(pointer.Filter{
+			Target: &ui.watchVideoTag,
+			Kinds:  pointer.Press | pointer.Move,
+		})
+		if !ok {
+			break
+		}
+		pe := ev.(pointer.Event)
+		ui.watchLastMouseMove = time.Now()
+		if pe.Kind == pointer.Press && pe.Buttons.Contain(pointer.ButtonPrimary) {
+			now := time.Now()
+			if now.Sub(ui.lastVideoClickTime) < 300*time.Millisecond {
+				ui.toggleFullscreen()
+				ui.lastVideoClickTime = time.Time{}
+			} else {
+				ui.lastVideoClickTime = now
+				if ui.embedPlayer != nil {
+					ui.embedPlayer.TogglePause()
+				}
+			}
+		}
+	}
+
+	return layout.Dimensions{Size: box}
+}
+
+func (ui *UI) layoutControlsBar(gtx layout.Context, widthPx int) layout.Dimensions {
+	barH := gtx.Dp(44)
+	gtx.Constraints.Min = image.Pt(widthPx, barH)
+	gtx.Constraints.Max = image.Pt(widthPx, barH)
+
+	// Seek progress bar
+	progressH := gtx.Dp(12)
+	pArea := clip.Rect(image.Rect(0, 0, widthPx, progressH)).Push(gtx.Ops)
+	event.Op(gtx.Ops, &ui.watchProgressTag)
+	pArea.Pop()
+
+	for {
+		ev, ok := gtx.Event(pointer.Filter{
+			Target: &ui.watchProgressTag,
+			Kinds:  pointer.Press | pointer.Drag | pointer.Release,
+		})
+		if !ok {
+			break
+		}
+		pe := ev.(pointer.Event)
+		ui.watchLastMouseMove = time.Now()
+		if pe.Kind == pointer.Press || pe.Kind == pointer.Drag {
+			frac := float64(pe.Position.X) / float64(widthPx)
+			if frac < 0 {
+				frac = 0
+			}
+			if frac > 1 {
+				frac = 1
+			}
+			if ui.watchDuration > 0 && ui.embedPlayer != nil {
+				targetTime := frac * ui.watchDuration
+				ui.watchCurrentTime = targetTime
+				ui.embedPlayer.Seek(targetTime, false)
+			}
+		}
+	}
+
+	// Render progress line (3dp)
+	progY := gtx.Dp(4)
+	progLineH := gtx.Dp(3)
+	paint.FillShape(gtx.Ops, color.NRGBA{R: 0x30, G: 0x30, B: 0x30, A: 0xff}, clip.Rect(image.Rect(0, progY, widthPx, progY+progLineH)).Op())
+
+	frac := 0.0
+	if ui.watchDuration > 0 {
+		frac = ui.watchCurrentTime / ui.watchDuration
+		if frac < 0 {
+			frac = 0
+		}
+		if frac > 1 {
+			frac = 1
+		}
+	}
+	playedW := int(frac * float64(widthPx))
+	if playedW > 0 {
+		paint.FillShape(gtx.Ops, ui.colors.Red, clip.Rect(image.Rect(0, progY, playedW, progY+progLineH)).Op())
+	}
+	handleR := gtx.Dp(5)
+	handleRect := image.Rect(playedW-handleR, progY+progLineH/2-handleR, playedW+handleR, progY+progLineH/2+handleR)
+	paint.FillShape(gtx.Ops, ui.colors.Red, clip.Ellipse(handleRect).Op(gtx.Ops))
+
+	if ui.watchPlayPauseClick.Clicked(gtx) {
+		if ui.embedPlayer != nil {
+			ui.embedPlayer.TogglePause()
+		}
+	}
+	if ui.watchMuteClick.Clicked(gtx) {
+		if ui.embedPlayer != nil {
+			ui.embedPlayer.ToggleMute()
+		}
+	}
+	if ui.watchFullscreenClick.Clicked(gtx) {
+		ui.toggleFullscreen()
+	}
+
+	return layout.Inset{Top: unit.Dp(10)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		return layout.Flex{
+			Axis:      layout.Horizontal,
+			Alignment: layout.Middle,
+			Spacing:   layout.SpaceBetween,
+		}.Layout(gtx,
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						btnSize := gtx.Dp(28)
+						gtx.Constraints.Min = image.Pt(btnSize, btnSize)
+						gtx.Constraints.Max = image.Pt(btnSize, btnSize)
+						return ui.watchPlayPauseClick.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							if ui.watchPlayPauseClick.Hovered() {
+								pointer.CursorPointer.Add(gtx.Ops)
+							}
+							drawPlayPauseIcon(gtx, image.Rect(0, 0, btnSize, btnSize), ui.colors.Text, ui.watchPaused)
+							return layout.Dimensions{Size: image.Pt(btnSize, btnSize)}
+						})
+					}),
+					layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						btnSize := gtx.Dp(28)
+						gtx.Constraints.Min = image.Pt(btnSize, btnSize)
+						gtx.Constraints.Max = image.Pt(btnSize, btnSize)
+						return ui.watchMuteClick.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							if ui.watchMuteClick.Hovered() {
+								pointer.CursorPointer.Add(gtx.Ops)
+							}
+							drawSpeakerIcon(gtx, image.Rect(0, 0, btnSize, btnSize), ui.colors.Text, ui.watchMuted)
+							return layout.Dimensions{Size: image.Pt(btnSize, btnSize)}
+						})
+					}),
+					layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						curStr := yt.FormatDuration(int(ui.watchCurrentTime))
+						durStr := yt.FormatDuration(int(ui.watchDuration))
+						timeStr := fmt.Sprintf("%s / %s", curStr, durStr)
+						lbl := material.Label(ui.th, unit.Sp(13), timeStr)
+						lbl.Color = ui.colors.Text
+						return lbl.Layout(gtx)
+					}),
+				)
+			}),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				btnSize := gtx.Dp(28)
+				gtx.Constraints.Min = image.Pt(btnSize, btnSize)
+				gtx.Constraints.Max = image.Pt(btnSize, btnSize)
+				return ui.watchFullscreenClick.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+					if ui.watchFullscreenClick.Hovered() {
+						pointer.CursorPointer.Add(gtx.Ops)
+					}
+					drawFullscreenIcon(gtx, image.Rect(0, 0, btnSize, btnSize), ui.colors.Text, ui.watchFullscreen)
+					return layout.Dimensions{Size: image.Pt(btnSize, btnSize)}
+				})
+			}),
+		)
+	})
+}
+
+func (ui *UI) layoutVideoDetails(gtx layout.Context, v yt.Video, widthPx int) layout.Dimensions {
+	gtx.Constraints.Min.X = widthPx
+	gtx.Constraints.Max.X = widthPx
+
+	if ui.watchSubscribeClick.Clicked(gtx) {
+		if ui.isSubscribed(v.ChannelID) {
+			ui.removeSubscription(v.ChannelID)
+		} else {
+			ui.addSubscription(v.ChannelID)
+		}
+	}
+	if ui.watchLaterClick.Clicked(gtx) {
+		ui.toggleWatchLater(v)
+	}
+	if ui.watchExternalMPVClick.Clicked(gtx) {
+		vid := ui.watchVideo
+		ui.closeWatchPage()
+		ui.playVideoExternal(vid, false)
+	}
+
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+		// Title: 20 sp medium, max 2 lines
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			lbl := material.Label(ui.th, unit.Sp(20), v.Title)
+			lbl.Font.Weight = font.Medium
+			lbl.Color = ui.colors.Text
+			lbl.MaxLines = 2
+			lbl.Truncator = "…"
+			return lbl.Layout(gtx)
+		}),
+		layout.Rigid(layout.Spacer{Height: unit.Dp(10)}.Layout),
+
+		// Channel row: (A) Channel name 16sp medium  [Subscribe]  [Watch later] [mpv]
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{
+				Axis:      layout.Horizontal,
+				Alignment: layout.Middle,
+			}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return layoutAvatar(gtx, ui.th, v.ChannelID, v.Channel, 36)
+				}),
+				layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					lbl := material.Label(ui.th, unit.Sp(16), v.Channel)
+					lbl.Font.Weight = font.Medium
+					lbl.Color = ui.colors.Text
+					return lbl.Layout(gtx)
+				}),
+				layout.Rigid(layout.Spacer{Width: unit.Dp(24)}.Layout),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					isSub := ui.isSubscribed(v.ChannelID)
+					label := "Subscribe"
+					btnBg := ui.colors.Red
+					btnFg := color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff}
+					if isSub {
+						label = "Subscribed"
+						btnBg = ui.colors.Surface
+						btnFg = ui.colors.Text
+					}
+					btn := material.Button(ui.th, &ui.watchSubscribeClick, label)
+					btn.Background = btnBg
+					btn.Color = btnFg
+					btn.CornerRadius = unit.Dp(18)
+					btn.Inset = layout.Inset{Top: unit.Dp(8), Bottom: unit.Dp(8), Left: unit.Dp(16), Right: unit.Dp(16)}
+					return btn.Layout(gtx)
+				}),
+				layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					btn := material.Button(ui.th, &ui.watchLaterClick, "Watch later")
+					btn.Background = ui.colors.Surface
+					btn.Color = ui.colors.Text
+					btn.CornerRadius = unit.Dp(18)
+					btn.Inset = layout.Inset{Top: unit.Dp(8), Bottom: unit.Dp(8), Left: unit.Dp(14), Right: unit.Dp(14)}
+					return btn.Layout(gtx)
+				}),
+				layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					btn := material.Button(ui.th, &ui.watchExternalMPVClick, "mpv")
+					btn.Background = ui.colors.Surface
+					btn.Color = ui.colors.Text
+					btn.CornerRadius = unit.Dp(18)
+					btn.Inset = layout.Inset{Top: unit.Dp(8), Bottom: unit.Dp(8), Left: unit.Dp(14), Right: unit.Dp(14)}
+					return btn.Layout(gtx)
+				}),
+			)
+		}),
+		layout.Rigid(layout.Spacer{Height: unit.Dp(16)}.Layout),
+
+		// Surface box radius 12: "1.2M views · 3 days ago" + description
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return layout.Background{}.Layout(gtx,
+				func(gtx layout.Context) layout.Dimensions {
+					r := clip.UniformRRect(image.Rectangle{Max: gtx.Constraints.Min}, gtx.Dp(12))
+					paint.FillShape(gtx.Ops, ui.colors.Surface, r.Op(gtx.Ops))
+					return layout.Dimensions{Size: gtx.Constraints.Min}
+				},
+				func(gtx layout.Context) layout.Dimensions {
+					return layout.Inset{
+						Top:    unit.Dp(12),
+						Bottom: unit.Dp(12),
+						Left:   unit.Dp(16),
+						Right:  unit.Dp(16),
+					}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						metaText := FormatMetaLine(v.ViewCount, v.UploadDate, v.PublishedAt, time.Now())
+						return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								lbl := material.Label(ui.th, unit.Sp(14), metaText)
+								lbl.Font.Weight = font.Medium
+								lbl.Color = ui.colors.Text
+								return lbl.Layout(gtx)
+							}),
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								if v.Description == "" {
+									return layout.Dimensions{}
+								}
+								return layout.Inset{Top: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+									desc := material.Label(ui.th, unit.Sp(13), v.Description)
+									desc.Color = ui.colors.Text
+									desc.MaxLines = 6
+									desc.Truncator = "…"
+									return desc.Layout(gtx)
+								})
+							}),
+						)
+					})
+				},
+			)
+		}),
+	)
+}
+
+func (ui *UI) layoutUpNextList(gtx layout.Context, widthPx int) layout.Dimensions {
+	videos := ui.upNextVideos
+	if len(videos) == 0 {
+		return layout.Dimensions{}
+	}
+
+	for len(ui.upNextClicks) < len(videos) {
+		ui.upNextClicks = append(ui.upNextClicks, widget.Clickable{})
+	}
+
+	gtx.Constraints.Min.X = widthPx
+	gtx.Constraints.Max.X = widthPx
+
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			lbl := material.Label(ui.th, unit.Sp(16), "Up next")
+			lbl.Font.Weight = font.Bold
+			lbl.Color = ui.colors.Text
+			return layout.Inset{Bottom: unit.Dp(12)}.Layout(gtx, lbl.Layout)
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return ui.upNextList.Layout(gtx, len(videos), func(gtx layout.Context, i int) layout.Dimensions {
+				v := videos[i]
+				click := &ui.upNextClicks[i]
+				if click.Clicked(gtx) {
+					ui.openWatchPage(v)
+				}
+				if click.Hovered() {
+					pointer.CursorPointer.Add(gtx.Ops)
+				}
+				thumbW := gtx.Dp(168)
+				thumbH := thumbW * 9 / 16
+
+				return click.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+					return layout.Inset{Bottom: unit.Dp(12)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								return ui.layoutCardThumbnail(gtx, v, thumbW, thumbH, false, click.Hovered(), nil)
+							}),
+							layout.Rigid(layout.Spacer{Width: unit.Dp(10)}.Layout),
+							layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+								return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+										lbl := material.Label(ui.th, unit.Sp(14), v.Title)
+										lbl.Font.Weight = font.Medium
+										lbl.Color = ui.colors.Text
+										lbl.MaxLines = 2
+										lbl.Truncator = "…"
+										return lbl.Layout(gtx)
+									}),
+									layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
+									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+										lbl := material.Label(ui.th, unit.Sp(12), v.Channel)
+										lbl.Color = ui.colors.Text2
+										lbl.MaxLines = 1
+										return lbl.Layout(gtx)
+									}),
+									layout.Rigid(layout.Spacer{Height: unit.Dp(2)}.Layout),
+									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+										metaText := FormatMetaLine(v.ViewCount, v.UploadDate, v.PublishedAt, time.Now())
+										lbl := material.Label(ui.th, unit.Sp(12), metaText)
+										lbl.Color = ui.colors.Text2
+										return lbl.Layout(gtx)
+									}),
+								)
+							}),
+						)
+					})
+				})
+			})
+		}),
 	)
 }

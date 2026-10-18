@@ -134,6 +134,17 @@ func (m *Manager) Get(id string) (image.Image, bool) {
 	return m.lru.get(id)
 }
 
+// Clear flushes all in-memory decoded images from the LRU cache.
+func (m *Manager) Clear() {
+	if m == nil || m.lru == nil {
+		return
+	}
+	m.lru.mu.Lock()
+	defer m.lru.mu.Unlock()
+	m.lru.items = make(map[string]*list.Element)
+	m.lru.order.Init()
+}
+
 // Load requests a thumbnail asynchronously. Network fetching and image decoding
 // execute off the caller goroutine. The callback is invoked when the image is ready.
 func (m *Manager) Load(id string, callback func(image.Image, error)) {
