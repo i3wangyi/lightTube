@@ -1,18 +1,40 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
+	"strings"
 
 	"lighttube/internal/player"
+	"lighttube/internal/store"
+	"lighttube/internal/yt"
 )
 
 const version = "0.1.0"
 
-func printUsage() {
-	fmt.Fprintf(os.Stderr, "lightTube — small, fast YouTube client\n\nUsage:\n  lighttube play <url> [--audio]\n  lighttube --version\n")
+func printUsage(w io.Writer) {
+	fmt.Fprintf(w, `lightTube — small, fast YouTube client
+
+Usage:
+  lighttube play <url> [--audio]
+  lighttube search <query>
+  lighttube feed
+  lighttube sub add <url|@handle|UC id>
+  lighttube sub list
+  lighttube --version
+`)
+}
+
+type appEnv struct {
+	ytClient *yt.Client
+	store    *store.Store
+	stdout   io.Writer
+	stderr   io.Writer
+	stdin    io.Reader
 }
 
 func main() {
@@ -23,8 +45,25 @@ func main() {
 }
 
 func run(args []string) error {
+	st, err := store.New()
+	if err != nil {
+		return fmt.Errorf("initializing store: %w", err)
+	}
+
+	env := &appEnv{
+		ytClient: yt.NewClient(),
+		store:    st,
+		stdout:   os.Stdout,
+		stderr:   os.Stderr,
+		stdin:    os.Stdin,
+	}
+
+	return runWithEnv(env, args)
+}
+
+func runWithEnv(env *appEnv, args []string) error {
 	if len(args) == 0 {
-		printUsage()
+		printUsage(env.stderr)
 		return errors.New("no command specified")
 	}
 
@@ -39,28 +78,34 @@ func run(args []string) error {
 	}
 
 	if len(filtered) == 0 {
-		printUsage()
+		printUsage(env.stderr)
 		return errors.New("no command specified")
 	}
 
 	switch filtered[0] {
 	case "--version", "-version", "version":
-		fmt.Println("lighttube " + version)
+		fmt.Fprintln(env.stdout, "lighttube "+version)
 		return nil
 	case "--help", "-help", "-h", "help":
-		printUsage()
+		printUsage(env.stdout)
 		return nil
 	case "play":
-		return runPlay(filtered[1:], debug)
+		return runPlay(env, filtered[1:], debug)
+	case "search":
+		return runSearch(env, filtered[1:])
+	case "feed":
+		return runFeed(env, filtered[1:])
+	case "sub":
+		return runSub(env, filtered[1:])
 	default:
-		printUsage()
+		printUsage(env.stderr)
 		return fmt.Errorf("unknown command %q", filtered[0])
 	}
 }
 
-func runPlay(args []string, debug bool) error {
+func runPlay(env *appEnv, args []string, debug bool) error {
 	fs := flag.NewFlagSet("play", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
+	fs.SetOutput(env.stderr)
 	audio := fs.Bool("audio", false, "play audio only")
 
 	if err := fs.Parse(args); err != nil {
@@ -73,7 +118,6 @@ func runPlay(args []string, debug bool) error {
 	}
 
 	url := rest[0]
-	// Support trailing flags such as 'play <url> --audio'.
 	for _, extra := range rest[1:] {
 		if extra == "--audio" || extra == "-audio" {
 			*audio = true
@@ -84,9 +128,9 @@ func runPlay(args []string, debug bool) error {
 	opts := player.Options{
 		URL:    url,
 		Audio:  *audio,
-		Stdin:  os.Stdin,
-		Stdout: os.Stdout,
-		Stderr: os.Stderr,
+		Stdin:  env.stdin,
+		Stdout: env.stdout,
+		Stderr: env.stderr,
 	}
 
 	if debug {
@@ -95,9 +139,105 @@ func runPlay(args []string, debug bool) error {
 		if *audio {
 			mode = player.ModeAudio
 		}
-		fmt.Fprintf(os.Stderr, "debug: detected power=%v, mode=%v\n", power, mode)
-		fmt.Fprintf(os.Stderr, "debug: mpv args=%q\n", p.BuildArgs(opts))
+		fmt.Fprintf(env.stderr, "debug: detected power=%v, mode=%v\n", power, mode)
+		fmt.Fprintf(env.stderr, "debug: mpv args=%q\n", p.BuildArgs(opts))
 	}
 
 	return p.Play(opts)
+}
+
+func runSearch(env *appEnv, args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: lighttube search <query>")
+	}
+
+	query := strings.Join(args, " ")
+	videos, err := env.ytClient.Search(context.Background(), query)
+	if err != nil {
+		return err
+	}
+
+	for _, v := range videos {
+		durationStr := yt.FormatDuration(v.Duration)
+		fmt.Fprintf(env.stdout, "%s\t%s\t%s\t%s\n", v.ID, v.Title, v.Channel, durationStr)
+	}
+
+	return nil
+}
+
+func runFeed(env *appEnv, args []string) error {
+	subs := env.store.Subscriptions()
+	if len(subs) == 0 {
+		return nil
+	}
+
+	channelIDs := make([]string, 0, len(subs))
+	for _, sub := range subs {
+		if sub.ChannelID != "" {
+			channelIDs = append(channelIDs, sub.ChannelID)
+		}
+	}
+
+	videos, err := env.ytClient.MergedFeed(context.Background(), channelIDs)
+	if err != nil {
+		return err
+	}
+
+	for _, v := range videos {
+		dateStr := ""
+		if !v.PublishedAt.IsZero() {
+			dateStr = v.PublishedAt.Format("2006-01-02 15:04")
+		}
+		fmt.Fprintf(env.stdout, "%s\t%s\t%s\t%s\n", v.ID, v.Title, v.Channel, dateStr)
+	}
+
+	return nil
+}
+
+func runSub(env *appEnv, args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: lighttube sub <add|list> ...")
+	}
+
+	switch args[0] {
+	case "add":
+		if len(args) < 2 {
+			return errors.New("usage: lighttube sub add <url|@handle|UC id>")
+		}
+		target := args[1]
+		channelID, err := env.ytClient.ResolveChannel(context.Background(), target)
+		if err != nil {
+			return err
+		}
+
+		title := channelID
+		// Attempt to extract friendly channel title from feed.
+		if feedVideos, feedErr := env.ytClient.Feed(context.Background(), channelID); feedErr == nil && len(feedVideos) > 0 {
+			if feedVideos[0].Channel != "" {
+				title = feedVideos[0].Channel
+			}
+		}
+
+		sub := yt.Subscription{
+			ChannelID: channelID,
+			Title:     title,
+			URL:       "https://www.youtube.com/channel/" + channelID,
+		}
+
+		if err := env.store.AddSubscription(sub); err != nil {
+			return err
+		}
+
+		fmt.Fprintf(env.stdout, "added %s (%s)\n", title, channelID)
+		return nil
+
+	case "list":
+		for _, sub := range env.store.Subscriptions() {
+			fmt.Fprintf(env.stdout, "%s\t%s\t%s\n", sub.ChannelID, sub.Title, sub.URL)
+		}
+		return nil
+
+	default:
+		return fmt.Errorf("unknown sub command %q", args[0])
+	}
 }

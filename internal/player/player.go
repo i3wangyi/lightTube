@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -146,10 +147,47 @@ func (p *Player) Stop() error {
 			_ = syscall.Kill(peerPID, syscall.SIGKILL)
 		}
 		p.killCurrentProcess()
+	} else if peerPID > 0 && peerPID != os.Getpid() {
+		// Wait up to 1s for old mpv process to exit before returning,
+		// so the old mpv cannot remove the new socket.
+		waitForProcessExit(peerPID, 1*time.Second)
 	}
 
 	_ = os.Remove(p.socketPath)
 	return nil
+}
+
+func waitForProcessExit(pid int, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if isProcessExited(pid) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func isProcessExited(pid int) bool {
+	if pid <= 0 {
+		return true
+	}
+	err := syscall.Kill(pid, 0)
+	if errors.Is(err, syscall.ESRCH) {
+		return true
+	}
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return true
+	}
+	s := string(data)
+	idx := strings.LastIndex(s, ")")
+	if idx >= 0 && idx+2 < len(s) {
+		state := s[idx+2]
+		if state == 'Z' || state == 'X' {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *Player) killCurrentProcess() {
