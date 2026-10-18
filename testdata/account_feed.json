@@ -1,0 +1,31 @@
+{
+  "id": "recommended",
+  "title": "recommended",
+  "_type": "playlist",
+  "entries": [
+    {
+      "id": "vid001home01",
+      "title": "First Test Video",
+      "channel": "Tech Channel",
+      "channel_id": "UCtech123456789012345678",
+      "uploader": "Tech Channel",
+      "uploader_id": "@techchannel",
+      "duration": 345,
+      "view_count": 12500,
+      "upload_date": "20261015",
+      "url": "https://www.youtube.com/watch?v=vid001home01"
+    },
+    {
+      "id": "vid002home02",
+      "title": "Second Test Video",
+      "channel": "Cooking Channel",
+      "channel_id": "UCcook123456789012345678",
+      "uploader": "Cooking Channel",
+      "uploader_id": "@cookingchannel",
+      "duration": 890,
+      "view_count": 450000,
+      "upload_date": "20261016",
+      "url": "https://www.youtube.com/watch?v=vid002home02"
+    }
+  ]
+}
