@@ -48,6 +48,46 @@ compositor background.
 - Paste: if the search box text is a YouTube URL, Enter plays it instead of
   searching. Keep `Ctrl+V` global paste-and-play. Remove the "Paste URL" button.
 - Right: the policy label as a small chip (`surface` bg, text2, 12 sp).
+- Search box fixes (phase 5; the phase 3 box is wrong):
+  - The box is centered in the window width, not placed after the logo. It
+    grows to 640 max and shrinks on narrow windows (min 200).
+  - The text and placeholder are vertically centered in the 40 high box,
+    16 sp, with 16 dp left inset and 12 dp right inset. One line only.
+  - The border is the same 1 dp on all four sides of the input part; the
+    button shares the right border and has a 1 dp `border` line on its left.
+  - Height of the button = height of the box (40). The magnifier is 24 dp.
+  - Optional like YouTube: an "x" clear button inside the box when it has text.
+
+### Watch page (phase 5)
+Opens on single click on a card or row. Layout like YouTube's watch page:
+
+```
+┌ top bar (same) ────────────────────────────────────────────────────────┐
+│ ┌──────────────────────────────────────┐  Up next                      │
+│ │                                      │  ┌──────┐ Title 14 sp, 2 lines│
+│ │        video (subsurface), 16:9      │  │ 168w │ Channel 12 sp       │
+│ │                                      │  └──────┘ views · age 12 sp   │
+│ ├──────────────────────────────────────┤  ...                          │
+│ │ ▶  ⏮ ⏭  🔊 ───  0:42 / 12:34    ⛶  │  (list = current feed or      │
+│ └──────────────────────────────────────┘   search results, minus this) │
+│ Title 20 sp medium, max 2 lines                                         │
+│ (A) Channel name 16 sp medium   [Subscribe]       [Watch later] [mpv]   │
+│ ┌ surface box radius 12: "1.2M views · 3 days ago" + description ────┐ │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+- Video column width: window width − 24 − 402 (Up next 402 wide) on wide
+  windows; on windows < 1000 wide, Up next goes below the description.
+- Controls bar (Gio, below the video, never over it): play/pause, volume
+  with mute, time "0:42 / 12:34", red progress bar (click and drag to seek,
+  buffered part in `#717171`), fullscreen button. Poll mpv time at most 4
+  times a second, and only while playing and the window is visible.
+- Keys: Space/K play-pause, J/L −10/+10 s, ←/→ −5/+5 s, M mute,
+  F fullscreen (Gio window fullscreen; video fills it, controls hidden until
+  the mouse moves), Esc leaves fullscreen or goes back, O opens in external mpv.
+- Click on the video area toggles pause; double click toggles fullscreen.
+- Back: Esc or the guide item returns to the previous page and stops playback
+  (YouTube's mini player is out of scope).
 
 ### Left mini guide (72 wide)
 Four items, icon above label (icon 24, label 10 sp, text2; selected item has

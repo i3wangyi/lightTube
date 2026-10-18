@@ -140,4 +140,77 @@ Playing a video adds it to history (newest first, keep 500).
 4. Integration: `Makefile` (build, test, install to `~/.local/bin`), a desktop
    entry, a Hyprland window rule and keybinding snippet in `contrib/`, README.
 
-Out of scope: comments, sign-in, recommendations, live chat, downloads, SponsorBlock.
+5. In-place player (see "Embedded player" below) and the watch page in DESIGN.md.
+6. Account through Chrome's login (see "Account" below).
+
+Phase 4 runs after phases 5 and 6.
+
+Out of scope: comments, live chat, downloads, SponsorBlock, OAuth sign-in.
+
+## Embedded player (internal/embed, phase 5)
+
+Video plays inside the lightTube window. The goal is the same CPU cost as
+external mpv (about 20% of one core at 1080p30), so hardware decode and a
+zero-copy path are required.
+
+Method: libmpv render API (OpenGL) drawing into a Wayland **subsurface** of
+the Gio window.
+
+- Get `wl_display` and `wl_surface` from Gio's `app.WaylandViewEvent`.
+- Create a private event queue (`wl_display_create_queue`) and a registry on
+  it. Bind `wl_compositor` and `wl_subcompositor` there. Never dispatch Gio's
+  default queue from another goroutine or thread.
+- Create a child `wl_surface`, a `wl_subsurface` on the Gio surface,
+  `wl_subsurface_set_desync`, and an empty input region
+  (`wl_surface_set_input_region` with an empty `wl_region`). All pointer and
+  key input then goes to Gio; Gio sends commands to mpv.
+- Create a `wl_egl_window`, an EGL display/context/surface for it, and an
+  `mpv_render_context` with `MPV_RENDER_API_TYPE_OPENGL`,
+  `MPV_RENDER_PARAM_OPENGL_INIT_PARAMS` and **`MPV_RENDER_PARAM_WL_DISPLAY`**
+  (required for VA-API interop). Render on a dedicated locked OS thread when
+  the mpv update callback fires. Respect the buffer scale (2 on this machine):
+  `wl_surface_set_buffer_scale` and an EGL window size in pixels.
+- Each frame, the UI reports the video rectangle (in dp) to the embed package.
+  The embed package calls `wl_subsurface_set_position` and resizes the EGL
+  window only when the rectangle changes. When the watch page is not shown,
+  unmap the subsurface (attach a NULL buffer) and pause.
+- mpv options: `hwdec=vaapi`, `vo=libmpv`, `ytdl-format` from the policy,
+  `osc=no`, `input-default-bindings=no`, `save-position-on-quit=yes`, the
+  same cookie options as the account section.
+- Create the mpv handle on the first play and destroy it (and the
+  subsurface and EGL objects) when the watch page closes. Idle RSS must go
+  back to the value before playback.
+- Use cgo with `pkg-config: mpv wayland-client wayland-egl egl`. Do not use a
+  Go mpv binding module.
+- Forbidden: `--wid` (does not work on Wayland), the software render API
+  (`MPV_RENDER_API_TYPE_SW`), `hwdec=vaapi-copy`, any frame readback into Go.
+- Keep the external mpv path. `--external-player` flag and the "Open in mpv"
+  action on the watch page use it.
+
+Acceptance (measure, 1080p30 H.264, no input):
+- mpv property `hwdec-current` is `vaapi` (log it with `--debug`).
+- Whole process CPU ≤ 25% of one core while playing.
+- After closing the watch page, RSS returns to within 10 MB of the value
+  before playback, and idle CPU is ≤ 1%.
+
+## Account (phase 6)
+
+Sign-in uses the Google session that already exists in Google Chrome.
+There is no OAuth and no API key.
+
+- Settings page entry "Account": "Use Chrome's YouTube login" toggle, a browser
+  field (default `chrome`), and the status (signed in / failed with reason).
+- On sign-in, run once:
+  `yt-dlp --cookies-from-browser chrome --cookies <data>/cookies.txt --skip-download ...`
+  to write a cookie file. Create it with mode 0600. All later yt-dlp calls
+  and mpv (`ytdl-raw-options=cookies=<path>`) use the file, so the keyring is
+  not decrypted on every call. If a call fails with a login error, extract
+  again once, then show the error.
+- Never log or print cookie values.
+- Feeds when signed in (yt-dlp `--flat-playlist -J`, first 60 items):
+  Home = `:ytrec`, Subscriptions = `:ytsubs`, Watch later = `:ytwatchlater`,
+  History = `:ythistory`. Cache each feed to disk; show the cache first,
+  then refresh in the background. When signed out, keep the RSS feed and
+  the local lists.
+- Signed-in Home replaces the RSS Home; the local subscription list stays as
+  the chips source and fallback.
