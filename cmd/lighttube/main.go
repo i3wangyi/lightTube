@@ -11,6 +11,8 @@ import (
 
 	"lighttube/internal/player"
 	"lighttube/internal/store"
+	"lighttube/internal/thumbs"
+	"lighttube/internal/ui"
 	"lighttube/internal/yt"
 )
 
@@ -20,6 +22,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintf(w, `lightTube — small, fast YouTube client
 
 Usage:
+  lighttube
   lighttube play <url> [--audio]
   lighttube search <query>
   lighttube feed
@@ -30,11 +33,12 @@ Usage:
 }
 
 type appEnv struct {
-	ytClient *yt.Client
-	store    *store.Store
-	stdout   io.Writer
-	stderr   io.Writer
-	stdin    io.Reader
+	ytClient  *yt.Client
+	store     *store.Store
+	stdout    io.Writer
+	stderr    io.Writer
+	stdin     io.Reader
+	guiRunner func(env *appEnv) error
 }
 
 func main() {
@@ -56,17 +60,20 @@ func run(args []string) error {
 		stdout:   os.Stdout,
 		stderr:   os.Stderr,
 		stdin:    os.Stdin,
+		guiRunner: func(e *appEnv) error {
+			return ui.Run(ui.Options{
+				YTClient: e.ytClient,
+				Store:    e.store,
+				Player:   player.New(),
+				Thumbs:   thumbs.New(),
+			})
+		},
 	}
 
 	return runWithEnv(env, args)
 }
 
 func runWithEnv(env *appEnv, args []string) error {
-	if len(args) == 0 {
-		printUsage(env.stderr)
-		return errors.New("no command specified")
-	}
-
 	var debug bool
 	var filtered []string
 	for _, arg := range args {
@@ -78,6 +85,9 @@ func runWithEnv(env *appEnv, args []string) error {
 	}
 
 	if len(filtered) == 0 {
+		if env.guiRunner != nil {
+			return env.guiRunner(env)
+		}
 		printUsage(env.stderr)
 		return errors.New("no command specified")
 	}
