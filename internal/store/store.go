@@ -43,15 +43,9 @@ func New() (*Store, error) {
 
 // NewWithDir creates a Store in a specified directory.
 func NewWithDir(dir string) (*Store, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, fmt.Errorf("creating store directory: %w", err)
-	}
-
-	s := &Store{
-		dir:        dir,
-		subs:       []yt.Subscription{},
-		watchLater: []yt.Video{},
-		history:    []yt.Video{},
+	s, err := NewDeferred(dir)
+	if err != nil {
+		return nil, err
 	}
 
 	if err := s.loadAll(); err != nil {
@@ -59,6 +53,27 @@ func NewWithDir(dir string) (*Store, error) {
 	}
 
 	return s, nil
+}
+
+// NewDeferred creates a Store in a specified directory without reading files immediately.
+func NewDeferred(dir string) (*Store, error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("creating store directory: %w", err)
+	}
+
+	return &Store{
+		dir:        dir,
+		subs:       []yt.Subscription{},
+		watchLater: []yt.Video{},
+		history:    []yt.Video{},
+	}, nil
+}
+
+// LoadAll reads subscriptions, watch later, and playback history from disk.
+func (s *Store) LoadAll() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.loadAll()
 }
 
 func (s *Store) loadAll() error {

@@ -133,6 +133,9 @@ func TestParseFeedXML(t *testing.T) {
 	if first.PublishedAt.IsZero() {
 		t.Errorf("expected non-zero published time")
 	}
+	if first.ViewCount != 130202 {
+		t.Errorf("expected 130202 views, got %d", first.ViewCount)
+	}
 }
 
 func TestParseFeedXMLHidesShorts(t *testing.T) {

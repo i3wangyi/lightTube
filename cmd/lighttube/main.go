@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"lighttube/internal/player"
 	"lighttube/internal/store"
@@ -17,6 +18,8 @@ import (
 )
 
 const version = "0.1.0"
+
+var processStart = time.Now()
 
 func printUsage(w io.Writer) {
 	fmt.Fprintf(w, `lightTube — small, fast YouTube client
@@ -49,6 +52,51 @@ func main() {
 }
 
 func run(args []string) error {
+	var debug bool
+	var search string
+	var filtered []string
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--debug" {
+			debug = true
+			continue
+		}
+		if arg == "--search" && i+1 < len(args) {
+			search = args[i+1]
+			i++
+			continue
+		}
+		filtered = append(filtered, arg)
+	}
+
+	// For GUI execution (no subcommands), do not read store files before the first frame.
+	if len(filtered) == 0 {
+		st, err := store.NewDeferred(store.DefaultDataDir())
+		if err != nil {
+			return fmt.Errorf("initializing store: %w", err)
+		}
+
+		env := &appEnv{
+			ytClient: yt.NewClient(),
+			store:    st,
+			stdout:   os.Stdout,
+			stderr:   os.Stderr,
+			stdin:    os.Stdin,
+			guiRunner: func(e *appEnv) error {
+				return ui.Run(ui.Options{
+					YTClient:  e.ytClient,
+					Store:     e.store,
+					Player:    player.New(),
+					Thumbs:    thumbs.New(),
+					Debug:     debug,
+					StartTime: processStart,
+					Search:    search,
+				})
+			},
+		}
+		return runWithEnv(env, args)
+	}
+
 	st, err := store.New()
 	if err != nil {
 		return fmt.Errorf("initializing store: %w", err)
@@ -60,14 +108,6 @@ func run(args []string) error {
 		stdout:   os.Stdout,
 		stderr:   os.Stderr,
 		stdin:    os.Stdin,
-		guiRunner: func(e *appEnv) error {
-			return ui.Run(ui.Options{
-				YTClient: e.ytClient,
-				Store:    e.store,
-				Player:   player.New(),
-				Thumbs:   thumbs.New(),
-			})
-		},
 	}
 
 	return runWithEnv(env, args)

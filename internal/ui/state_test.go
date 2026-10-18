@@ -48,6 +48,12 @@ func TestStateSelection(t *testing.T) {
 		t.Errorf("expected clamped selection 0, got %d", st.SelectedIndex)
 	}
 
+	// Move in grid (columns = 2)
+	st.MoveSelectionGrid(1, 0, 2)
+	if st.SelectedIndex != 1 {
+		t.Errorf("expected selection 1 after grid move, got %d", st.SelectedIndex)
+	}
+
 	// Empty list.
 	st.SetVideos(nil)
 	if st.SelectedIndex != -1 {
@@ -70,11 +76,11 @@ func TestResolveKeyAction(t *testing.T) {
 		expectedDelta   int
 	}{
 		{
-			name:           "Ctrl+1 switches to TabSearch",
+			name:           "Ctrl+1 switches to TabHome",
 			keyName:        "1",
 			mods:           key.ModCtrl,
 			expectedAction: ActionSwitchTab,
-			expectedTab:    TabSearch,
+			expectedTab:    TabHome,
 		},
 		{
 			name:           "Ctrl+2 switches to TabSubscriptions",

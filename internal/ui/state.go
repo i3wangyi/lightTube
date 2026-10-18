@@ -6,28 +6,31 @@ import (
 	"lighttube/internal/yt"
 )
 
-// Tab represents an active navigation tab.
+// Tab represents an active view or mini-guide navigation item.
 type Tab int
 
 const (
-	TabSearch Tab = iota
+	TabHome Tab = iota
 	TabSubscriptions
 	TabWatchLater
 	TabHistory
+	TabSearch
 )
 
 func (t Tab) String() string {
 	switch t {
-	case TabSearch:
-		return "Search"
+	case TabHome:
+		return "Home"
 	case TabSubscriptions:
 		return "Subscriptions"
 	case TabWatchLater:
 		return "Watch later"
 	case TabHistory:
 		return "History"
-	default:
+	case TabSearch:
 		return "Search"
+	default:
+		return "Home"
 	}
 }
 
@@ -48,11 +51,11 @@ const (
 // ResolveKeyAction determines the high-level UI action for a key press event.
 // It respects whether an editor currently holds focus.
 func ResolveKeyAction(name key.Name, mods key.Modifiers, isEditorFocused bool) (KeyAction, Tab, int) {
-	// Ctrl+1..4 switches tabs globally, even if an editor is focused.
+	// Ctrl+1..4 switches to the 4 mini guide items (Home, Subs, Later, History).
 	if mods.Contain(key.ModCtrl) {
 		switch name {
 		case "1":
-			return ActionSwitchTab, TabSearch, 0
+			return ActionSwitchTab, TabHome, 0
 		case "2":
 			return ActionSwitchTab, TabSubscriptions, 0
 		case "3":
@@ -75,6 +78,10 @@ func ResolveKeyAction(name key.Name, mods key.Modifiers, isEditorFocused bool) (
 	}
 
 	switch name {
+	case key.NameLeftArrow:
+		return ActionMoveSelection, 0, -1
+	case key.NameRightArrow:
+		return ActionMoveSelection, 0, 1
 	case key.NameUpArrow:
 		return ActionMoveSelection, 0, -1
 	case key.NameDownArrow:
@@ -92,38 +99,55 @@ func ResolveKeyAction(name key.Name, mods key.Modifiers, isEditorFocused bool) (
 
 // State manages UI navigation, selection, and current item lists.
 type State struct {
-	CurrentTab    Tab
-	Videos        []yt.Video
-	SelectedIndex int
-	Subscriptions []yt.Subscription
-	Status        string
+	CurrentTab          Tab
+	Videos              []yt.Video
+	SelectedIndex       int
+	Subscriptions       []yt.Subscription
+	ActiveChannelFilter string
+	Status              string
 }
 
-// NewState creates an initial UI state.
+// NewState creates an initial UI state with Home as the default view.
 func NewState() *State {
 	return &State{
-		CurrentTab:    TabSearch,
+		CurrentTab:    TabHome,
 		Videos:        nil,
 		SelectedIndex: -1,
-		Status:        "Ready",
+		Status:        "",
 	}
+}
+
+// FilteredVideos returns videos filtered by active channel chip if on Home tab.
+func (s *State) FilteredVideos() []yt.Video {
+	if s.CurrentTab == TabHome && s.ActiveChannelFilter != "" {
+		filtered := make([]yt.Video, 0, len(s.Videos))
+		for _, v := range s.Videos {
+			if v.ChannelID == s.ActiveChannelFilter {
+				filtered = append(filtered, v)
+			}
+		}
+		return filtered
+	}
+	return s.Videos
 }
 
 // SetVideos updates the active video list and adjusts selection.
 func (s *State) SetVideos(videos []yt.Video) {
 	s.Videos = videos
-	if len(videos) == 0 {
+	filtered := s.FilteredVideos()
+	if len(filtered) == 0 {
 		s.SelectedIndex = -1
 		return
 	}
-	if s.SelectedIndex < 0 || s.SelectedIndex >= len(videos) {
+	if s.SelectedIndex < 0 || s.SelectedIndex >= len(filtered) {
 		s.SelectedIndex = 0
 	}
 }
 
 // MoveSelection adjusts the selected video index by delta, clamping to valid bounds.
 func (s *State) MoveSelection(delta int) {
-	if len(s.Videos) == 0 {
+	videos := s.FilteredVideos()
+	if len(videos) == 0 {
 		s.SelectedIndex = -1
 		return
 	}
@@ -132,18 +156,27 @@ func (s *State) MoveSelection(delta int) {
 	if newIdx < 0 {
 		newIdx = 0
 	}
-	if newIdx >= len(s.Videos) {
-		newIdx = len(s.Videos) - 1
+	if newIdx >= len(videos) {
+		newIdx = len(videos) - 1
 	}
 	s.SelectedIndex = newIdx
 }
 
+// MoveSelectionGrid moves selection in a grid with the given columns count.
+func (s *State) MoveSelectionGrid(deltaX, deltaY, columns int) {
+	if columns < 1 {
+		columns = 1
+	}
+	s.MoveSelection(deltaX + deltaY*columns)
+}
+
 // SelectedVideo returns the currently selected video item, if any.
 func (s *State) SelectedVideo() (yt.Video, bool) {
-	if s.SelectedIndex < 0 || s.SelectedIndex >= len(s.Videos) {
+	videos := s.FilteredVideos()
+	if s.SelectedIndex < 0 || s.SelectedIndex >= len(videos) {
 		return yt.Video{}, false
 	}
-	return s.Videos[s.SelectedIndex], true
+	return videos[s.SelectedIndex], true
 }
 
 // SwitchTab changes the active tab and resets video selection.
