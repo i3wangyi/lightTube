@@ -143,7 +143,14 @@ Playing a video adds it to history (newest first, keep 500).
 5. In-place player (see "Embedded player" below) and the watch page in DESIGN.md.
 6. Account through Chrome's login (see "Account" below).
 
-Phase 4 runs after phases 5 and 6.
+7. Portability (see "Portability" below).
+
+Phase 4 runs after phases 5 and 6. Phase 7 runs after phase 4.
+Decision (2026-10-18): stay a native app. No hosted website: it would decode
+in the browser (the CPU problem this app solves), proxy video through a
+server, need the user's cookies on that server, and break YouTube's terms.
+A later optional `lighttube serve` (LAN remote control, playback stays in
+mpv on the laptop) is allowed.
 
 Out of scope: comments, live chat, downloads, SponsorBlock, OAuth sign-in.
 
@@ -220,3 +227,35 @@ There is no OAuth and no API key.
   the local lists.
 - Signed-in Home replaces the RSS Home; the local subscription list stays as
   the chips source and fallback.
+
+## Portability (phase 7)
+
+Target order: generic Linux (any desktop, X11 and Wayland, any GPU), then
+Windows, then macOS.
+
+- `internal/platform`, one file per OS (build tags): power source
+  (Linux sysfs, macOS IOKit or `pmset -g batt`, Windows `GetSystemPowerStatus`),
+  font files (Linux Noto paths, macOS PingFang + SF, Windows Microsoft YaHei +
+  Segoe UI; fall back to Gio's system font scan when none is found),
+  default cookie browser spec (Linux `chrome+gnomekeyring` or
+  `chrome+kwallet` by desktop, macOS `chrome`, Windows `firefox` because
+  Chrome's app-bound cookie encryption blocks yt-dlp there), and the
+  modifier key (Cmd on macOS, Ctrl elsewhere).
+- Paths: `os.UserConfigDir` / `os.UserCacheDir` instead of raw XDG variables.
+- Decode: `hwdec=auto-safe`. Codec policy from what the GPU decodes
+  (Linux: query VA-API profiles; others: allow VP9/AV1 when the hwdec
+  reports them), with a manual setting. The Broadwell H.264-only chain stays
+  as the "Old GPU" choice.
+- Embedded player backends: Linux Wayland (subsurface, phase 5),
+  Linux X11 and Windows (mpv `wid` with a child window from Gio's view
+  event), macOS (NSView; verify before building). External mpv is the
+  fallback on every OS.
+- External player IPC: Unix socket on Linux and macOS, named pipe on Windows.
+  Linux-only peer PID checks behind build tags.
+- `lighttube doctor`: checks mpv/libmpv, yt-dlp version age, yt-dlp's
+  JavaScript runtime, active hwdec, login state; prints install hints.
+- Settings page: login browser spec, codec policy, in-place or external player.
+- Build: drop `novulkan,nox11` as defaults (keep them as a local Makefile
+  option for this machine). CI matrix builds per OS (cgo, no cross-compile).
+  Packaging: Linux AppImage or tarball + `.desktop`; Windows zip with
+  mpv-2.dll; macOS `.app` (signing only if shared).
