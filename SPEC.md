@@ -199,14 +199,20 @@ Sign-in uses the Google session that already exists in Google Chrome.
 There is no OAuth and no API key.
 
 - Settings page entry "Account": "Use Chrome's YouTube login" toggle, a browser
-  field (default `chrome`), and the status (signed in / failed with reason).
+  field (default `chrome+gnomekeyring`), and the status (signed in / failed with reason).
 - On sign-in, run once:
-  `yt-dlp --cookies-from-browser chrome --cookies <data>/cookies.txt --skip-download ...`
+  `yt-dlp --cookies-from-browser chrome+gnomekeyring --cookies <data>/cookies.txt --skip-download ...`
   to write a cookie file. Create it with mode 0600. All later yt-dlp calls
   and mpv (`ytdl-raw-options=cookies=<path>`) use the file, so the keyring is
   not decrypted on every call. If a call fails with a login error, extract
   again once, then show the error.
 - Never log or print cookie values.
+- Measured 2026-10-18: yt-dlp does not detect Hyprland as a desktop and picks
+  the BASICTEXT keyring, so all 912 Chrome cookies fail to decrypt. The
+  `+gnomekeyring` suffix is required. With it, 30 items take 4–5 s per feed
+  (history 11 s), including keyring decrypt. Some fields are `NA`
+  (view_count on rec/subs, channel on history, duration on live items).
+  Omit unknown parts in the UI.
 - Feeds when signed in (yt-dlp `--flat-playlist -J`, first 60 items):
   Home = `:ytrec`, Subscriptions = `:ytsubs`, Watch later = `:ytwatchlater`,
   History = `:ythistory`. Cache each feed to disk; show the cache first,
