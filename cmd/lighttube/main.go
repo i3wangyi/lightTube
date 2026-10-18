@@ -28,7 +28,8 @@ Usage:
   lighttube
   lighttube play <url> [--audio]
   lighttube search <query>
-  lighttube feed
+  lighttube feed [--account home|subs|later|history]
+  lighttube account <signin|signout|status>
   lighttube sub add <url|@handle|UC id>
   lighttube sub list
   lighttube --version
@@ -38,6 +39,7 @@ Usage:
 type appEnv struct {
 	ytClient  *yt.Client
 	store     *store.Store
+	account   *yt.Account
 	stdout    io.Writer
 	stderr    io.Writer
 	stdin     io.Reader
@@ -79,6 +81,7 @@ func run(args []string) error {
 		env := &appEnv{
 			ytClient: yt.NewClient(),
 			store:    st,
+			account:  yt.NewAccount(),
 			stdout:   os.Stdout,
 			stderr:   os.Stderr,
 			stdin:    os.Stdin,
@@ -105,6 +108,7 @@ func run(args []string) error {
 	env := &appEnv{
 		ytClient: yt.NewClient(),
 		store:    st,
+		account:  yt.NewAccount(),
 		stdout:   os.Stdout,
 		stderr:   os.Stderr,
 		stdin:    os.Stdin,
@@ -145,6 +149,8 @@ func runWithEnv(env *appEnv, args []string) error {
 		return runSearch(env, filtered[1:])
 	case "feed":
 		return runFeed(env, filtered[1:])
+	case "account":
+		return runAccount(env, filtered[1:])
 	case "sub":
 		return runSub(env, filtered[1:])
 	default:
@@ -216,6 +222,16 @@ func runSearch(env *appEnv, args []string) error {
 }
 
 func runFeed(env *appEnv, args []string) error {
+	if len(args) > 0 {
+		if args[0] == "--account" || args[0] == "-account" {
+			return runAccountFeed(env, args[1:])
+		}
+		if strings.HasPrefix(args[0], "--account=") || strings.HasPrefix(args[0], "-account=") {
+			parts := strings.SplitN(args[0], "=", 2)
+			return runAccountFeed(env, []string{parts[1]})
+		}
+	}
+
 	subs := env.store.Subscriptions()
 	if len(subs) == 0 {
 		return nil

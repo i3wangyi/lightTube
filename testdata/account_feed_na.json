@@ -1,0 +1,57 @@
+{
+  "id": "feed_with_na",
+  "title": "feed with na",
+  "_type": "playlist",
+  "entries": [
+    {
+      "id": "vid003na0001",
+      "title": "Rec Video with NA view_count",
+      "channel": "Channel A",
+      "channel_id": "UCchA1234567890123456789",
+      "uploader": "Channel A",
+      "uploader_id": "@channela",
+      "duration": 120,
+      "view_count": "NA",
+      "upload_date": "20261017",
+      "url": "https://www.youtube.com/watch?v=vid003na0001"
+    },
+    {
+      "id": "vid004na0002",
+      "title": "History Video with null channel and NA id fields",
+      "channel": "NA",
+      "channel_id": null,
+      "uploader": "NA",
+      "uploader_id": null,
+      "duration": 312,
+      "view_count": null,
+      "upload_date": "NA",
+      "url": null
+    },
+    {
+      "id": "vid005na0003",
+      "title": "Live Stream Video with NA duration",
+      "channel": "Live News",
+      "channel_id": "UClive123456789012345678",
+      "uploader": "Live News",
+      "uploader_id": "@livenews",
+      "duration": "NA",
+      "view_count": 9876,
+      "upload_date": null,
+      "url": "https://www.youtube.com/watch?v=vid005na0003"
+    },
+    {
+      "id": "NA",
+      "title": "Invalid Video with NA id",
+      "channel": "Ghost",
+      "duration": 50,
+      "view_count": 10
+    },
+    {
+      "id": "",
+      "title": "Invalid Video with empty id",
+      "channel": "Ghost",
+      "duration": 50,
+      "view_count": 10
+    }
+  ]
+}
