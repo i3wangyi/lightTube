@@ -18,6 +18,11 @@ Build the application:
 make
 ```
 
+Build tags are automatically detected:
+- `novulkan`: applied when `/usr/include/vulkan/vulkan.h` is missing.
+- `nox11`: applied when X11 libraries (`x11-xcb`, `xkbcommon-x11`, `xcursor`) are missing from `pkg-config`.
+- To override auto-detected tags: `make build TAGS=novulkan,nox11`.
+
 Run checks (`gofmt`, `go vet`, and tests):
 ```sh
 make check

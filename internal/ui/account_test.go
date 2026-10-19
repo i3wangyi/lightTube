@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"gioui.org/layout"
 	"gioui.org/op"
@@ -184,6 +185,17 @@ func TestRefreshAccountFeedGating(t *testing.T) {
 
 	// Second concurrent call should not launch duplicate or panic
 	ui.refreshAccountFeed(yt.FeedHome)
+
+	// Wait for background goroutine to complete before TempDir cleanup
+	for i := 0; i < 50; i++ {
+		time.Sleep(10 * time.Millisecond)
+		ui.refreshMu.Lock()
+		active := ui.refreshingFeeds[yt.FeedHome]
+		ui.refreshMu.Unlock()
+		if !active {
+			break
+		}
+	}
 }
 
 func TestLayoutAccountView(t *testing.T) {

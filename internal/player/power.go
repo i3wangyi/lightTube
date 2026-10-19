@@ -1,56 +1,23 @@
 package player
 
-import (
-	"os"
-	"path/filepath"
-	"strings"
-)
+import "lighttube/internal/platform"
 
 const defaultSysfsPowerSupply = "/sys/class/power_supply"
 
-// DetectPower determines the system power source by reading sysfs.
+// DetectPower determines the system power source using platform detection.
 // Per specification, it treats missing or unreadable mains supplies as AC.
 func DetectPower() Power {
-	return detectPowerFrom(defaultSysfsPowerSupply)
+	onBat, known := platform.OnBattery()
+	if known && onBat {
+		return PowerBattery
+	}
+	return PowerAC
 }
 
 func detectPowerFrom(dir string) Power {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		// Default to AC if sysfs directory cannot be accessed.
-		return PowerAC
-	}
-
-	foundMains := false
-	hasOfflineMains := false
-
-	for _, entry := range entries {
-		typeBytes, err := os.ReadFile(filepath.Join(dir, entry.Name(), "type"))
-		if err != nil {
-			continue
-		}
-		if !strings.EqualFold(strings.TrimSpace(string(typeBytes)), "Mains") {
-			continue
-		}
-
-		foundMains = true
-		onlineBytes, err := os.ReadFile(filepath.Join(dir, entry.Name(), "online"))
-		if err != nil {
-			continue
-		}
-
-		switch strings.TrimSpace(string(onlineBytes)) {
-		case "1":
-			return PowerAC
-		case "0":
-			hasOfflineMains = true
-		}
-	}
-
-	// Treat as battery only if mains supply was found and explicitly reported offline.
-	if foundMains && hasOfflineMains {
+	onBat, known := platform.OnBatteryFrom(dir)
+	if known && onBat {
 		return PowerBattery
 	}
-
 	return PowerAC
 }

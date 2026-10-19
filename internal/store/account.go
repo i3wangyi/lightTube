@@ -7,20 +7,13 @@ import (
 	"os"
 	"path/filepath"
 
+	"lighttube/internal/platform"
 	"lighttube/internal/yt"
 )
 
-// DefaultAccountCacheDir returns the standard account feed cache directory under XDG_CACHE_HOME.
+// DefaultAccountCacheDir returns the standard account feed cache directory under platform CacheDir.
 func DefaultAccountCacheDir() string {
-	cacheHome := os.Getenv("XDG_CACHE_HOME")
-	if cacheHome == "" {
-		home, _ := os.UserHomeDir()
-		if home == "" {
-			home = os.TempDir()
-		}
-		cacheHome = filepath.Join(home, ".cache")
-	}
-	return filepath.Join(cacheHome, "lighttube", "account")
+	return filepath.Join(platform.CacheDir(), "account")
 }
 
 // ReadAccountFeed reads a cached account feed from the default cache directory.

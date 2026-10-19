@@ -8,22 +8,15 @@ import (
 	"path/filepath"
 	"sync"
 
+	"lighttube/internal/platform"
 	"lighttube/internal/yt"
 )
 
 const maxHistory = 500
 
-// DefaultDataDir returns the standard data directory under XDG_DATA_HOME.
+// DefaultDataDir returns the standard data directory under platform DataDir.
 func DefaultDataDir() string {
-	dataHome := os.Getenv("XDG_DATA_HOME")
-	if dataHome == "" {
-		home, _ := os.UserHomeDir()
-		if home == "" {
-			home = os.TempDir()
-		}
-		dataHome = filepath.Join(home, ".local", "share")
-	}
-	return filepath.Join(dataHome, "lighttube")
+	return platform.DataDir()
 }
 
 // Store provides thread-safe persistence for subscriptions, watch later, and playback history.

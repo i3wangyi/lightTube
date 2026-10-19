@@ -13,19 +13,13 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"lighttube/internal/platform"
 )
 
-// DefaultFeedCacheDir returns the standard feed cache directory under XDG_CACHE_HOME.
+// DefaultFeedCacheDir returns the standard feed cache directory under platform CacheDir.
 func DefaultFeedCacheDir() string {
-	cacheHome := os.Getenv("XDG_CACHE_HOME")
-	if cacheHome == "" {
-		home, _ := os.UserHomeDir()
-		if home == "" {
-			home = os.TempDir()
-		}
-		cacheHome = filepath.Join(home, ".cache")
-	}
-	return filepath.Join(cacheHome, "lighttube", "feeds")
+	return filepath.Join(platform.CacheDir(), "feeds")
 }
 
 type atomFeed struct {

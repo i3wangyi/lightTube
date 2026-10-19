@@ -64,7 +64,7 @@ const (
 // It respects whether an editor currently holds focus.
 func ResolveKeyAction(name key.Name, mods key.Modifiers, isEditorFocused bool) (KeyAction, Tab, int) {
 	// Ctrl+1..5 switches to the mini guide items (Home, Subs, Later, History, Account).
-	if mods.Contain(key.ModCtrl) {
+	if mods.Contain(key.ModShortcut) {
 		switch name {
 		case "1":
 			return ActionSwitchTab, TabHome, 0
@@ -113,7 +113,7 @@ func ResolveKeyAction(name key.Name, mods key.Modifiers, isEditorFocused bool) (
 
 // ResolveWatchKeyAction handles keyboard shortcuts specific to the watch page.
 func ResolveWatchKeyAction(name key.Name, mods key.Modifiers, isEditorFocused bool) (KeyAction, Tab, int) {
-	if mods.Contain(key.ModCtrl) {
+	if mods.Contain(key.ModShortcut) {
 		switch name {
 		case "1":
 			return ActionSwitchTab, TabHome, 0

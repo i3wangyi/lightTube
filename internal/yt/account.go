@@ -13,12 +13,14 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"lighttube/internal/platform"
 )
 
-const (
-	// DefaultBrowserSpec is the default browser and keyring specification for yt-dlp cookie extraction.
-	DefaultBrowserSpec = "chrome+gnomekeyring"
-)
+// DefaultBrowserSpec returns the default browser and keyring specification for yt-dlp cookie extraction.
+func DefaultBrowserSpec() string {
+	return platform.DefaultBrowserSpec()
+}
 
 // ErrLoginRequired indicates YouTube authentication is missing, expired, or invalid.
 var ErrLoginRequired = errors.New("login required")
@@ -65,17 +67,9 @@ func (k FeedKind) Target() (string, error) {
 	}
 }
 
-// DefaultDataDir returns the base directory under XDG_DATA_HOME.
+// DefaultDataDir returns the base directory under platform DataDir.
 func DefaultDataDir() string {
-	dataHome := os.Getenv("XDG_DATA_HOME")
-	if dataHome == "" {
-		home, _ := os.UserHomeDir()
-		if home == "" {
-			home = os.TempDir()
-		}
-		dataHome = filepath.Join(home, ".local", "share")
-	}
-	return filepath.Join(dataHome, "lighttube")
+	return platform.DataDir()
 }
 
 // DefaultCookiePath returns the default location of the extracted cookies file.
@@ -83,17 +77,9 @@ func DefaultCookiePath() string {
 	return filepath.Join(DefaultDataDir(), "cookies.txt")
 }
 
-// DefaultAccountCacheDir returns the feed cache directory under XDG_CACHE_HOME.
+// DefaultAccountCacheDir returns the feed cache directory under platform CacheDir.
 func DefaultAccountCacheDir() string {
-	cacheHome := os.Getenv("XDG_CACHE_HOME")
-	if cacheHome == "" {
-		home, _ := os.UserHomeDir()
-		if home == "" {
-			home = os.TempDir()
-		}
-		cacheHome = filepath.Join(home, ".cache")
-	}
-	return filepath.Join(cacheHome, "lighttube", "account")
+	return filepath.Join(platform.CacheDir(), "account")
 }
 
 // Account manages YouTube account authentication and authenticated feeds.
@@ -125,7 +111,7 @@ func NewAccount() *Account {
 func NewAccountWithOptions(opts AccountOptions) *Account {
 	browser := opts.Browser
 	if browser == "" {
-		browser = DefaultBrowserSpec
+		browser = DefaultBrowserSpec()
 	}
 	cookieFile := opts.CookieFile
 	if cookieFile == "" {

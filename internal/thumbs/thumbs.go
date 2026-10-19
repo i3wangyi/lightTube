@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"lighttube/internal/platform"
 )
 
 const (
@@ -22,17 +24,9 @@ const (
 	thumbnailURLFormat = "https://i.ytimg.com/vi/%s/mqdefault.jpg"
 )
 
-// DefaultCacheDir returns the standard thumbnail disk cache directory under XDG_CACHE_HOME.
+// DefaultCacheDir returns the standard thumbnail disk cache directory under platform CacheDir.
 func DefaultCacheDir() string {
-	cacheHome := os.Getenv("XDG_CACHE_HOME")
-	if cacheHome == "" {
-		home, _ := os.UserHomeDir()
-		if home == "" {
-			home = os.TempDir()
-		}
-		cacheHome = filepath.Join(home, ".cache")
-	}
-	return filepath.Join(cacheHome, "lighttube", "thumbs")
+	return filepath.Join(platform.CacheDir(), "thumbs")
 }
 
 type lruEntry struct {

@@ -9,6 +9,8 @@ import (
 	"gioui.org/font/opentype"
 	"gioui.org/text"
 	"gioui.org/widget/material"
+
+	"lighttube/internal/platform"
 )
 
 // ThemeColors defines the color scheme for the dark theme matching DESIGN.md.
@@ -55,13 +57,9 @@ var DarkColors = ThemeColors{
 	SurfaceSelect: color.NRGBA{R: 0x27, G: 0x27, B: 0x27, A: 0xff},
 }
 
-// loadExplicitFonts loads Noto Sans and Noto Sans CJK without scanning all system fonts.
+// loadExplicitFonts loads standard platform fonts without scanning all system fonts.
 func loadExplicitFonts() []font.FontFace {
-	paths := []string{
-		"/usr/share/fonts/noto/NotoSans-Regular.ttf",
-		"/usr/share/fonts/noto/NotoSans-Medium.ttf",
-		"/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
-	}
+	paths := platform.FontFiles()
 
 	var allFaces []font.FontFace
 	for _, p := range paths {
@@ -79,11 +77,16 @@ func loadExplicitFonts() []font.FontFace {
 		}
 		// The CJK collection has 10 regional faces with the same glyph set.
 		// Parsing all of them costs about 185 MB of heap; one face costs 18 MB.
+		picked := false
 		for _, f := range faces {
 			if f.Font.Typeface == "Noto Sans CJK SC" {
 				allFaces = append(allFaces, f)
+				picked = true
 				break
 			}
+		}
+		if !picked && len(faces) > 0 {
+			allFaces = append(allFaces, faces[0])
 		}
 	}
 	return allFaces
@@ -91,6 +94,7 @@ func loadExplicitFonts() []font.FontFace {
 
 // NewDarkTheme initializes a material Theme configured with dark palette colors
 // and an explicit font collection, disabling full system font scanning for sub-500ms startup.
+// When no explicit font files are found, it falls back to Gio's system font scan.
 func NewDarkTheme() (*material.Theme, ThemeColors) {
 	faces := loadExplicitFonts()
 	// ParseCollection parses all 10 CJK faces before we drop 9, so the heap
@@ -100,7 +104,7 @@ func NewDarkTheme() (*material.Theme, ThemeColors) {
 	if len(faces) > 0 {
 		shaper = text.NewShaper(text.NoSystemFonts(), text.WithCollection(faces))
 	} else {
-		shaper = text.NewShaper(text.NoSystemFonts())
+		shaper = text.NewShaper()
 	}
 
 	th := material.NewTheme()

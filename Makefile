@@ -1,18 +1,38 @@
 GO ?= mise exec -- go
-TAGS = novulkan,nox11
 PREFIX ?= $(HOME)/.local
 DESTDIR ?=
+
+# Auto-detect build tags if not specified on the command line.
+# novulkan: added when /usr/include/vulkan/vulkan.h is missing
+# nox11: added when x11-xcb, xkbcommon-x11, or xcursor development packages are missing
+ifeq ($(origin TAGS), undefined)
+  DETECTED_TAGS :=
+  ifeq ($(shell test -f /usr/include/vulkan/vulkan.h || echo missing),missing)
+    DETECTED_TAGS := novulkan
+  endif
+  ifeq ($(shell pkg-config --exists x11-xcb xkbcommon-x11 xcursor 2>/dev/null || echo missing),missing)
+    ifneq ($(DETECTED_TAGS),)
+      DETECTED_TAGS := $(DETECTED_TAGS),nox11
+    else
+      DETECTED_TAGS := nox11
+    endif
+  endif
+  TAGS := $(DETECTED_TAGS)
+endif
+
+TAGS_FLAG := $(if $(strip $(TAGS)),-tags $(strip $(TAGS)))
 
 .PHONY: build test vet fmt check install uninstall clean
 
 build:
-	$(GO) build -tags $(TAGS) -trimpath -ldflags='-s -w' -o lighttube ./cmd/lighttube
+	@echo "Building with tags: $(TAGS)"
+	$(GO) build $(TAGS_FLAG) -trimpath -ldflags='-s -w' -o lighttube ./cmd/lighttube
 
 test:
-	$(GO) test -tags $(TAGS) ./...
+	$(GO) test $(TAGS_FLAG) ./...
 
 vet:
-	$(GO) vet -tags $(TAGS) ./...
+	$(GO) vet $(TAGS_FLAG) ./...
 
 fmt:
 	@test -z "$$(gofmt -l .)" || (gofmt -l . && exit 1)

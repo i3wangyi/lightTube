@@ -4,27 +4,17 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
-	"os"
 	"os/exec"
-	"path/filepath"
-	"strings"
 	"sync"
-	"syscall"
-	"time"
 )
 
 // DefaultAppID is the fixed Wayland app id for the mpv window.
 // Hyprland rules match this id to manage the video window.
 const DefaultAppID = "lighttube-mpv"
 
-// DefaultSocketPath returns the standard IPC socket location under XDG_RUNTIME_DIR.
+// DefaultSocketPath returns the standard IPC socket location for the active OS.
 func DefaultSocketPath() string {
-	runtimeDir := os.Getenv("XDG_RUNTIME_DIR")
-	if runtimeDir == "" {
-		runtimeDir = os.TempDir()
-	}
-	return filepath.Join(runtimeDir, "lighttube-mpv.sock")
+	return defaultSocketPath()
 }
 
 // Options configures playback parameters.
@@ -107,92 +97,8 @@ func (p *Player) BuildArgs(opts Options) []string {
 }
 
 // Stop terminates any running mpv instance.
-// It sends quit over the IPC socket; if unresponsive after 500ms, it terminates the process directly.
 func (p *Player) Stop() error {
-	if p.socketPath == "" {
-		p.killCurrentProcess()
-		return nil
-	}
-
-	if _, err := os.Stat(p.socketPath); os.IsNotExist(err) {
-		p.killCurrentProcess()
-		return nil
-	}
-
-	conn, err := net.DialTimeout("unix", p.socketPath, 500*time.Millisecond)
-	if err != nil {
-		// Clean up orphaned socket files from dead processes to allow rebinding.
-		_ = os.Remove(p.socketPath)
-		p.killCurrentProcess()
-		return nil
-	}
-	defer conn.Close()
-
-	peerPID := extractPeerPID(conn)
-
-	_ = conn.SetDeadline(time.Now().Add(500 * time.Millisecond))
-	_, writeErr := conn.Write([]byte("{\"command\": [\"quit\"]}\n"))
-
-	buf := make([]byte, 512)
-	_, readErr := conn.Read(buf)
-
-	timedOut := false
-	if writeErr != nil {
-		timedOut = true
-	} else if readErr != nil && !errors.Is(readErr, io.EOF) {
-		var netErr net.Error
-		if errors.As(readErr, &netErr) && netErr.Timeout() {
-			timedOut = true
-		}
-	}
-
-	if timedOut {
-		// Kill the unresponsive player process when the socket does not answer within 500ms.
-		if peerPID > 0 && peerPID != os.Getpid() {
-			_ = syscall.Kill(peerPID, syscall.SIGKILL)
-		}
-		p.killCurrentProcess()
-	} else if peerPID > 0 && peerPID != os.Getpid() {
-		// Wait up to 1s for old mpv process to exit before returning,
-		// so the old mpv cannot remove the new socket.
-		waitForProcessExit(peerPID, 1*time.Second)
-	}
-
-	_ = os.Remove(p.socketPath)
-	return nil
-}
-
-func waitForProcessExit(pid int, timeout time.Duration) {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if isProcessExited(pid) {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
-func isProcessExited(pid int) bool {
-	if pid <= 0 {
-		return true
-	}
-	err := syscall.Kill(pid, 0)
-	if errors.Is(err, syscall.ESRCH) {
-		return true
-	}
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
-	if err != nil {
-		return true
-	}
-	s := string(data)
-	idx := strings.LastIndex(s, ")")
-	if idx >= 0 && idx+2 < len(s) {
-		state := s[idx+2]
-		if state == 'Z' || state == 'X' {
-			return true
-		}
-	}
-	return false
+	return p.stopIPC()
 }
 
 func (p *Player) killCurrentProcess() {
@@ -203,26 +109,6 @@ func (p *Player) killCurrentProcess() {
 		_ = p.currentCmd.Wait()
 		p.currentCmd = nil
 	}
-}
-
-func extractPeerPID(conn net.Conn) int {
-	unixConn, ok := conn.(*net.UnixConn)
-	if !ok {
-		return 0
-	}
-	rawConn, err := unixConn.SyscallConn()
-	if err != nil {
-		return 0
-	}
-
-	var pid int
-	_ = rawConn.Control(func(fd uintptr) {
-		ucred, err := syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
-		if err == nil && ucred != nil {
-			pid = int(ucred.Pid)
-		}
-	})
-	return pid
 }
 
 // Start stops any running instance and spawns a new mpv process asynchronously.
@@ -236,8 +122,7 @@ func (p *Player) Start(opts Options) (*exec.Cmd, error) {
 	}
 
 	if p.socketPath != "" {
-		// Ensure socket directory exists before mpv attempts to bind.
-		if err := os.MkdirAll(filepath.Dir(p.socketPath), 0o700); err != nil {
+		if err := ensureSocketDir(p.socketPath); err != nil {
 			return nil, err
 		}
 	}

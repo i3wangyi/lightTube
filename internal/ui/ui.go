@@ -79,8 +79,8 @@ type UI struct {
 	debugPlaySeconds   int
 	debugPlayTriggered bool
 
-	// Embedded player & wayland view
-	waylandView  app.WaylandViewEvent
+	// Embedded player & platform view
+	view         platformView
 	embedPlayer  *embed.Player
 	currentScale int
 	hwdecLogged  bool
@@ -320,16 +320,9 @@ func (ui *UI) eventLoop() error {
 			os.Exit(0)
 			return nil
 
-		case app.WaylandViewEvent:
-			if e.Valid() {
-				ui.waylandView = e
-			} else {
-				if ui.embedPlayer != nil {
-					ui.embedPlayer.Stop()
-					ui.embedPlayer.Close()
-					ui.embedPlayer = nil
-				}
-				ui.waylandView = app.WaylandViewEvent{}
+		default:
+			if ui.handleViewEvent(e) {
+				break
 			}
 
 		case app.ConfigEvent:
@@ -508,7 +501,7 @@ func (ui *UI) signInAccount() {
 	}
 	spec := strings.TrimSpace(ui.accountBrowserEditor.Text())
 	if spec == "" {
-		spec = yt.DefaultBrowserSpec
+		spec = yt.DefaultBrowserSpec()
 	}
 	ui.account.SetBrowser(spec)
 	ui.accountSigningIn = true
@@ -934,15 +927,15 @@ func (ui *UI) layout(gtx layout.Context) layout.Dimensions {
 	event.Op(gtx.Ops, ui.windowTag)
 	for {
 		evt, ok := gtx.Event(
-			key.Filter{Name: "1", Required: key.ModCtrl},
-			key.Filter{Name: "2", Required: key.ModCtrl},
-			key.Filter{Name: "3", Required: key.ModCtrl},
-			key.Filter{Name: "4", Required: key.ModCtrl},
-			key.Filter{Name: "5", Required: key.ModCtrl},
-			key.Filter{Name: "L", Required: key.ModCtrl},
-			key.Filter{Name: "l", Required: key.ModCtrl},
-			key.Filter{Name: "V", Required: key.ModCtrl},
-			key.Filter{Name: "v", Required: key.ModCtrl},
+			key.Filter{Name: "1", Required: key.ModShortcut},
+			key.Filter{Name: "2", Required: key.ModShortcut},
+			key.Filter{Name: "3", Required: key.ModShortcut},
+			key.Filter{Name: "4", Required: key.ModShortcut},
+			key.Filter{Name: "5", Required: key.ModShortcut},
+			key.Filter{Name: "L", Required: key.ModShortcut},
+			key.Filter{Name: "l", Required: key.ModShortcut},
+			key.Filter{Name: "V", Required: key.ModShortcut},
+			key.Filter{Name: "v", Required: key.ModShortcut},
 			key.Filter{Name: key.NameUpArrow},
 			key.Filter{Name: key.NameDownArrow},
 			key.Filter{Name: key.NameLeftArrow},
@@ -2308,7 +2301,7 @@ func (ui *UI) layoutAccountView(gtx layout.Context) layout.Dimensions {
 							Left:   unit.Dp(14),
 							Right:  unit.Dp(14),
 						}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-							ed := material.Editor(ui.th, &ui.accountBrowserEditor, yt.DefaultBrowserSpec)
+							ed := material.Editor(ui.th, &ui.accountBrowserEditor, yt.DefaultBrowserSpec())
 							ed.Color = ui.colors.Text
 							ed.HintColor = ui.colors.Text2
 							ed.TextSize = unit.Sp(13)
@@ -2456,41 +2449,48 @@ func (ui *UI) openWatchPage(v yt.Video) {
 	_ = ui.store.AddHistory(v)
 	ui.state.Status = ""
 
-	if ui.waylandView.Valid() {
-		if ui.embedPlayer == nil {
-			p, err := embed.New(ui.waylandView.Display, ui.waylandView.Surface)
-			if err != nil {
-				ui.state.Status = "Failed to create embed player: " + err.Error()
-				return
-			}
-			ui.embedPlayer = p
-		}
+	if !ui.view.Valid() {
+		ui.state.CurrentTab = ui.previousTab
+		ui.playVideoExternal(v, false)
+		ui.state.Status = "Embedded player unavailable on this display; playing with external mpv"
+		return
+	}
 
-		cookiePath := ""
-		if ui.account != nil && ui.account.SignedIn() {
-			cookiePath, _ = ui.account.PlaybackCookieFile()
-		}
-
-		scale := ui.currentScale
-		if scale <= 0 {
-			scale = 2
-		}
-
-		policy := player.Format(ui.power, player.ModeVideo)
-		err := ui.embedPlayer.Play(embed.PlayOptions{
-			URL:         v.WatchURL(),
-			Title:       v.Title,
-			YTDLFormat:  policy,
-			CookiesFile: cookiePath,
-			WidthPx:     1280,
-			HeightPx:    720,
-			Scale:       scale,
-			Debug:       ui.debug,
-		})
+	if ui.embedPlayer == nil {
+		p, err := embed.New(ui.view.Display(), ui.view.Surface())
 		if err != nil {
-			ui.state.Status = "Playback error: " + err.Error()
+			ui.state.CurrentTab = ui.previousTab
+			ui.playVideoExternal(v, false)
+			ui.state.Status = fmt.Sprintf("Embedded player unavailable (%v); playing with external mpv", err)
 			return
 		}
+		ui.embedPlayer = p
+	}
+
+	cookiePath := ""
+	if ui.account != nil && ui.account.SignedIn() {
+		cookiePath, _ = ui.account.PlaybackCookieFile()
+	}
+
+	scale := ui.currentScale
+	if scale <= 0 {
+		scale = 2
+	}
+
+	policy := player.Format(ui.power, player.ModeVideo)
+	err := ui.embedPlayer.Play(embed.PlayOptions{
+		URL:         v.WatchURL(),
+		Title:       v.Title,
+		YTDLFormat:  policy,
+		CookiesFile: cookiePath,
+		WidthPx:     1280,
+		HeightPx:    720,
+		Scale:       scale,
+		Debug:       ui.debug,
+	})
+	if err != nil {
+		ui.state.Status = "Playback error: " + err.Error()
+		return
 	}
 
 	ui.watchPaused = false
