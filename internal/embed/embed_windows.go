@@ -214,6 +214,10 @@ func (b *windowsBackend) Play(opts PlayOptions) error {
 		hwdec = "auto-safe"
 	}
 	_ = b.setOption("hwdec", hwdec)
+	// The default demuxer cache (150 MiB ahead, 50 MiB back) was most of the
+	// RSS during playback; 64 MiB is still about 100 s of 1080p H.264.
+	_ = b.setOption("demuxer-max-bytes", "64MiB")
+	_ = b.setOption("demuxer-max-back-bytes", "16MiB")
 	_ = b.setOption("osc", "no")
 	_ = b.setOption("input-default-bindings", "no")
 	_ = b.setOption("save-position-on-quit", "yes")

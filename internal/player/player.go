@@ -71,6 +71,8 @@ func (p *Player) BuildArgs(opts Options) []string {
 
 	args := []string{
 		"--hwdec=" + HWDec(policy, opts.Caps),
+		"--demuxer-max-bytes=64MiB",
+		"--demuxer-max-back-bytes=16MiB",
 		"--vo=gpu",
 		"--ytdl-format=" + formatStr,
 		"--save-position-on-quit",

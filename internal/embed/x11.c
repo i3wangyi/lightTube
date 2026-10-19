@@ -212,6 +212,10 @@ int x11_embed_player_start(x11_embed_context *ctx, const char *url, const char *
 
     const char *hwdec_opt = (hwdec && hwdec[0]) ? hwdec : "auto-safe";
     ctx->mpv.mpv_set_option_string(ctx->mpv_ctx, "hwdec", hwdec_opt);
+    // The default demuxer cache (150 MiB ahead, 50 MiB back) was most of the
+    // RSS during playback; 64 MiB is still about 100 s of 1080p H.264.
+    ctx->mpv.mpv_set_option_string(ctx->mpv_ctx, "demuxer-max-bytes", "64MiB");
+    ctx->mpv.mpv_set_option_string(ctx->mpv_ctx, "demuxer-max-back-bytes", "16MiB");
 
     ctx->mpv.mpv_set_option_string(ctx->mpv_ctx, "osc", "no");
     ctx->mpv.mpv_set_option_string(ctx->mpv_ctx, "input-default-bindings", "no");
