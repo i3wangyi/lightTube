@@ -259,3 +259,29 @@ Windows, then macOS.
   option for this machine). CI matrix builds per OS (cgo, no cross-compile).
   Packaging: Linux AppImage or tarball + `.desktop`; Windows zip with
   mpv-2.dll; macOS `.app` (signing only if shared).
+
+### Phase 7 split and facts (2026-10-18)
+
+Facts: this machine has X11 dev libs and Xwayland, but no Vulkan headers, so
+`-tags novulkan` builds with X11 support. `GOOS=windows CGO_ENABLED=0` fails
+today on `syscall.Kill` and `syscall.GetsockoptUcred` in `internal/player`
+and on `internal/embed` (no Go files for that OS). `GOOS=darwin` vet fails on
+the same Ucred call.
+
+- 7a: `internal/platform` (power, fonts, default cookie browser, modifier,
+  data and cache dirs), build-tagged player IPC (Unix socket / named pipe,
+  process kill, peer PID check), `internal/embed` stub for unsupported OS
+  (the UI then uses the external player). Linux data dir stays
+  `$XDG_DATA_HOME/lighttube` (default `~/.local/share/lighttube`) so no
+  existing data moves; macOS and Windows use `os.UserConfigDir()/lighttube`.
+  Cache: `os.UserCacheDir()/lighttube`. Makefile detects tags: add
+  `novulkan` when `vulkan/vulkan.h` is missing, `nox11` when pkg-config has
+  no `x11-xcb xkbcommon-x11 xcursor`; `TAGS=...` overrides.
+  Acceptance: `GOOS=windows CGO_ENABLED=0 go build ./cmd/lighttube` and
+  `GOOS=darwin CGO_ENABLED=0 go vet` of the non-GUI packages pass.
+- 7b: `lighttube doctor`, `hwdec=auto-safe` with a codec policy setting
+  (auto from VA-API profiles through libva when available, "Old GPU"
+  H.264 ≤1080p, "Any"), Settings page (login browser, codec policy,
+  in-place or external player), settings stored in the data dir.
+- 7c: X11 embed (mpv `wid` child window), Windows embed (same API, untested
+  here), CI matrix, packaging (tarball + .desktop, Windows zip, macOS .app).
