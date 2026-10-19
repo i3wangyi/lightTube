@@ -1,14 +1,17 @@
 package ui
 
 import (
+	"bytes"
 	"image/color"
 	"os"
-	"runtime/debug"
 
 	"gioui.org/font"
 	"gioui.org/font/opentype"
 	"gioui.org/text"
 	"gioui.org/widget/material"
+	fontapi "github.com/go-text/typesetting/font"
+	ot "github.com/go-text/typesetting/font/opentype"
+	"github.com/go-text/typesetting/font/opentype/tables"
 
 	"lighttube/internal/platform"
 )
@@ -57,6 +60,14 @@ var DarkColors = ThemeColors{
 	SurfaceSelect: color.NRGBA{R: 0x27, G: 0x27, B: 0x27, A: 0xff},
 }
 
+type rawFontFace struct {
+	face *fontapi.Font
+}
+
+func (r rawFontFace) Face() *fontapi.Face {
+	return fontapi.NewFace(r.face)
+}
+
 // loadExplicitFonts loads standard platform fonts without scanning all system fonts.
 func loadExplicitFonts() []font.FontFace {
 	paths := platform.FontFiles()
@@ -67,27 +78,46 @@ func loadExplicitFonts() []font.FontFace {
 		if err != nil {
 			continue
 		}
+
+		// In TTC font collections (such as NotoSansCJK-Regular.ttc with 10 regional faces),
+		// opentype.ParseCollection parses all 10 faces into memory (costing ~185 MB heap).
+		// Inspect loaders to parse only the single face needed (Noto Sans CJK SC).
+		lds, err := ot.NewLoaders(bytes.NewReader(data))
+		if err == nil && len(lds) > 1 {
+			nameTag := ot.MustNewTag("name")
+			var targetLd *ot.Loader
+			for _, ld := range lds {
+				buf, err := ld.RawTable(nameTag)
+				if err != nil {
+					continue
+				}
+				names, _, err := tables.ParseName(buf)
+				if err != nil {
+					continue
+				}
+				if names.Name(1) == "Noto Sans CJK SC" || names.Name(4) == "Noto Sans CJK SC" {
+					targetLd = ld
+					break
+				}
+			}
+			if targetLd == nil {
+				targetLd = lds[0]
+			}
+			ft, err := fontapi.NewFont(targetLd)
+			if err == nil {
+				allFaces = append(allFaces, font.FontFace{
+					Font: opentype.DescriptionToFont(ft.Describe()),
+					Face: rawFontFace{face: ft},
+				})
+			}
+			continue
+		}
+
 		faces, err := opentype.ParseCollection(data)
 		if err != nil {
 			continue
 		}
-		if len(faces) == 1 {
-			allFaces = append(allFaces, faces...)
-			continue
-		}
-		// The CJK collection has 10 regional faces with the same glyph set.
-		// Parsing all of them costs about 185 MB of heap; one face costs 18 MB.
-		picked := false
-		for _, f := range faces {
-			if f.Font.Typeface == "Noto Sans CJK SC" {
-				allFaces = append(allFaces, f)
-				picked = true
-				break
-			}
-		}
-		if !picked && len(faces) > 0 {
-			allFaces = append(allFaces, faces[0])
-		}
+		allFaces = append(allFaces, faces...)
 	}
 	return allFaces
 }
@@ -97,9 +127,6 @@ func loadExplicitFonts() []font.FontFace {
 // When no explicit font files are found, it falls back to Gio's system font scan.
 func NewDarkTheme() (*material.Theme, ThemeColors) {
 	faces := loadExplicitFonts()
-	// ParseCollection parses all 10 CJK faces before we drop 9, so the heap
-	// peaks near 190 MB. Without a forced GC the idle app keeps that RSS.
-	debug.FreeOSMemory()
 	var shaper *text.Shaper
 	if len(faces) > 0 {
 		shaper = text.NewShaper(text.NoSystemFonts(), text.WithCollection(faces))

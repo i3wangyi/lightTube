@@ -16,12 +16,18 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/image/draw"
+
 	"lighttube/internal/platform"
 )
 
 const (
+	// Must stay above the number of thumbnails the UI requests at once (visible
+	// rows plus prefetch, all lists), or eviction and reload loop every frame.
 	DefaultLRUCapacity = 100
 	thumbnailURLFormat = "https://i.ytimg.com/vi/%s/mqdefault.jpg"
+	maxThumbWidth      = 640
+	maxThumbHeight     = 360
 )
 
 // DefaultCacheDir returns the standard thumbnail disk cache directory under platform CacheDir.
@@ -39,6 +45,7 @@ type lruCache struct {
 	capacity int
 	items    map[string]*list.Element
 	order    *list.List
+	onEvict  func(string)
 }
 
 func newLRUCache(capacity int) *lruCache {
@@ -80,7 +87,11 @@ func (c *lruCache) put(key string, img image.Image) {
 		oldest := c.order.Back()
 		if oldest != nil {
 			c.order.Remove(oldest)
-			delete(c.items, oldest.Value.(*lruEntry).key)
+			ent := oldest.Value.(*lruEntry)
+			delete(c.items, ent.key)
+			if c.onEvict != nil {
+				c.onEvict(ent.key)
+			}
 		}
 	}
 }
@@ -99,6 +110,7 @@ type Manager struct {
 	lru        *lruCache
 
 	flightMu sync.Mutex
+	epoch    uint64
 	inFlight map[string][]func(image.Image, error)
 }
 
@@ -123,6 +135,16 @@ func NewWithOptions(client *http.Client, cacheDir string, lruCapacity int) *Mana
 	}
 }
 
+// SetOnEvict sets a callback invoked whenever an entry is evicted from the memory LRU.
+func (m *Manager) SetOnEvict(fn func(key string)) {
+	if m == nil || m.lru == nil {
+		return
+	}
+	m.lru.mu.Lock()
+	defer m.lru.mu.Unlock()
+	m.lru.onEvict = fn
+}
+
 // Get synchronously returns the image from memory LRU if present.
 func (m *Manager) Get(id string) (image.Image, bool) {
 	return m.lru.get(id)
@@ -133,8 +155,18 @@ func (m *Manager) Clear() {
 	if m == nil || m.lru == nil {
 		return
 	}
+	m.flightMu.Lock()
+	m.epoch++
+	m.inFlight = make(map[string][]func(image.Image, error))
+	m.flightMu.Unlock()
+
 	m.lru.mu.Lock()
 	defer m.lru.mu.Unlock()
+	if m.lru.onEvict != nil {
+		for k := range m.lru.items {
+			m.lru.onEvict(k)
+		}
+	}
 	m.lru.items = make(map[string]*list.Element)
 	m.lru.order.Init()
 }
@@ -158,6 +190,7 @@ func (m *Manager) Load(id string, callback func(image.Image, error)) {
 	}
 
 	m.flightMu.Lock()
+	epoch := m.epoch
 	waiters, inProgress := m.inFlight[id]
 	if callback != nil {
 		m.inFlight[id] = append(waiters, callback)
@@ -173,7 +206,7 @@ func (m *Manager) Load(id string, callback func(image.Image, error)) {
 	m.flightMu.Unlock()
 
 	// Perform disk read/network fetch/decoding off the caller goroutine.
-	go m.processThumbnail(id)
+	go m.processThumbnail(epoch, id)
 }
 
 // Fetch blocks until the thumbnail is retrieved and decoded, executing work off the caller goroutine.
@@ -196,16 +229,23 @@ func (m *Manager) Fetch(ctx context.Context, id string) (image.Image, error) {
 	}
 }
 
-func (m *Manager) processThumbnail(id string) {
+func (m *Manager) processThumbnail(epoch uint64, id string) {
 	img, err := m.loadOrFetchAndDecode(id)
-	if err == nil && img != nil {
-		m.lru.put(id, img)
-	}
 
 	m.flightMu.Lock()
+	if epoch != m.epoch {
+		// Previous page was dropped; discard thumbnail.
+		delete(m.inFlight, id)
+		m.flightMu.Unlock()
+		return
+	}
 	waiters := m.inFlight[id]
 	delete(m.inFlight, id)
 	m.flightMu.Unlock()
+
+	if err == nil && img != nil {
+		m.lru.put(id, img)
+	}
 
 	for _, cb := range waiters {
 		if cb != nil {
@@ -221,7 +261,7 @@ func (m *Manager) loadOrFetchAndDecode(id string) (image.Image, error) {
 	if data, err := os.ReadFile(cacheFile); err == nil {
 		img, _, decodeErr := image.Decode(bytes.NewReader(data))
 		if decodeErr == nil {
-			return img, nil
+			return decodeAndScale(img), nil
 		}
 	}
 
@@ -259,7 +299,46 @@ func (m *Manager) loadOrFetchAndDecode(id string) (image.Image, error) {
 		return nil, fmt.Errorf("decoding thumbnail %s: %w", id, err)
 	}
 
-	return img, nil
+	return decodeAndScale(img), nil
+}
+
+func decodeAndScale(src image.Image) image.Image {
+	if src == nil {
+		return nil
+	}
+	bounds := src.Bounds()
+	w, h := bounds.Dx(), bounds.Dy()
+	if w <= 0 || h <= 0 {
+		return src
+	}
+
+	// Scale down if larger than maximum displayed size (640x360).
+	if w > maxThumbWidth || h > maxThumbHeight {
+		dstW := maxThumbWidth
+		dstH := h * maxThumbWidth / w
+		if dstH > maxThumbHeight {
+			dstH = maxThumbHeight
+			dstW = w * maxThumbHeight / h
+		}
+		if dstW < 1 {
+			dstW = 1
+		}
+		if dstH < 1 {
+			dstH = 1
+		}
+		dst := image.NewRGBA(image.Rect(0, 0, dstW, dstH))
+		draw.BiLinear.Scale(dst, dst.Bounds(), src, bounds, draw.Src, nil)
+		return dst
+	}
+
+	// For standard thumbnails within 640x360 (e.g. 320x180), convert to *image.RGBA
+	// once so Gio's paint.NewImageOp shares the identical buffer without allocating a copy.
+	if rgba, ok := src.(*image.RGBA); ok {
+		return rgba
+	}
+	dst := image.NewRGBA(image.Rect(0, 0, w, h))
+	draw.Draw(dst, dst.Bounds(), src, bounds.Min, draw.Src)
+	return dst
 }
 
 func atomicWriteFile(dest string, data []byte) error {

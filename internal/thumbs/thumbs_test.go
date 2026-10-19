@@ -65,6 +65,38 @@ func TestLRUCacheEviction(t *testing.T) {
 	}
 }
 
+func TestLRUCacheOnEvict(t *testing.T) {
+	cache := newLRUCache(2)
+	var evicted []string
+	cache.onEvict = func(key string) {
+		evicted = append(evicted, key)
+	}
+
+	cache.put("a", image.NewRGBA(image.Rect(0, 0, 1, 1)))
+	cache.put("b", image.NewRGBA(image.Rect(0, 0, 1, 1)))
+	cache.put("c", image.NewRGBA(image.Rect(0, 0, 1, 1)))
+
+	if len(evicted) != 1 || evicted[0] != "a" {
+		t.Errorf("expected [a] evicted, got %v", evicted)
+	}
+}
+
+func TestDecodeAndScale(t *testing.T) {
+	// A 1280x720 image should scale down to 640x360.
+	large := image.NewRGBA(image.Rect(0, 0, 1280, 720))
+	scaled := decodeAndScale(large)
+	if scaled.Bounds().Dx() != 640 || scaled.Bounds().Dy() != 360 {
+		t.Errorf("expected 640x360, got %v", scaled.Bounds())
+	}
+
+	// A 320x180 image should retain its dimensions.
+	standard := image.NewRGBA(image.Rect(0, 0, 320, 180))
+	res := decodeAndScale(standard)
+	if res.Bounds().Dx() != 320 || res.Bounds().Dy() != 180 {
+		t.Errorf("expected 320x180, got %v", res.Bounds())
+	}
+}
+
 type roundTripFunc func(req *http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {

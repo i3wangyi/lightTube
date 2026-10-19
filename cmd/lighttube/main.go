@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	rdebug "runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -57,12 +58,21 @@ func main() {
 }
 
 func run(args []string) error {
+	// During playback the Go heap held 150-180 MB of pages while about 40 MB
+	// was live: Gio rebuilds vertex and stroke data on each redraw (about
+	// 9 MB/s), and the GC lets the heap grow. A soft limit makes it return
+	// pages. Measured: 96 MiB costs no CPU; 64 MiB made GC use ~35% of a core.
+	// GOMEMLIMIT overrides.
+	if os.Getenv("GOMEMLIMIT") == "" {
+		rdebug.SetMemoryLimit(96 << 20)
+	}
 	var debug bool
 	var search string
 	var externalPlayer bool
 	var debugPlay string
 	var debugPlaySeconds int
 	var debugTab string
+	var debugHeap string
 	var filtered []string
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -91,6 +101,11 @@ func run(args []string) error {
 		}
 		if arg == "--debug-tab" && i+1 < len(args) {
 			debugTab = args[i+1]
+			i++
+			continue
+		}
+		if arg == "--debug-heap" && i+1 < len(args) {
+			debugHeap = args[i+1]
 			i++
 			continue
 		}
@@ -125,6 +140,7 @@ func run(args []string) error {
 					DebugPlay:        debugPlay,
 					DebugPlaySeconds: debugPlaySeconds,
 					DebugTab:         debugTab,
+					DebugHeap:        debugHeap,
 				})
 			},
 		}

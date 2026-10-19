@@ -7,10 +7,13 @@ import (
 	"image/color"
 	"io"
 	"os"
+	"os/signal"
 	"runtime"
 	"runtime/debug"
+	"runtime/pprof"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"gioui.org/app"
@@ -50,6 +53,7 @@ type Options struct {
 	DebugPlay        string
 	DebugPlaySeconds int
 	DebugTab         string
+	DebugHeap        string
 }
 
 // UI manages the Gio window, layout, and event interactions.
@@ -79,6 +83,8 @@ type UI struct {
 	debugPlay          string
 	debugPlaySeconds   int
 	debugPlayTriggered bool
+	debugHeap          string
+	heapWritten        bool
 
 	// Embedded player & platform view
 	view         platformView
@@ -240,6 +246,7 @@ func New(opts Options) *UI {
 		externalPlayer:     extPlayer,
 		debugPlay:          opts.DebugPlay,
 		debugPlaySeconds:   opts.DebugPlaySeconds,
+		debugHeap:          opts.DebugHeap,
 		watchLastMouseMove: time.Now(),
 		watchVolume:        100,
 		currentScale:       2,
@@ -248,6 +255,14 @@ func New(opts Options) *UI {
 		imageOps:           make(map[string]paint.ImageOp),
 		windowTag:          new(int),
 		pasteTag:           new(int),
+	}
+
+	if ui.thumbs != nil {
+		ui.thumbs.SetOnEvict(func(id string) {
+			ui.sendAction(func() {
+				delete(ui.imageOps, id)
+			})
+		})
 	}
 
 	if opts.DebugTab == "you" || opts.DebugTab == "account" {
@@ -292,6 +307,27 @@ func New(opts Options) *UI {
 }
 
 // Run configures the application ID, initializes the window, and runs the event loop.
+func (ui *UI) writeHeapProfile() {
+	if ui.debugHeap == "" {
+		return
+	}
+	runtime.GC()
+	f, err := os.Create(ui.debugHeap)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to create heap profile: %v\n", err)
+		return
+	}
+	defer f.Close()
+	if err := pprof.WriteHeapProfile(f); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to write heap profile: %v\n", err)
+		return
+	}
+	ui.heapWritten = true
+	if ui.debug {
+		fmt.Fprintf(os.Stderr, "heap profile written to %s\n", ui.debugHeap)
+	}
+}
+
 func Run(opts Options) error {
 	app.ID = "lighttube"
 
@@ -306,12 +342,25 @@ func Run(opts Options) error {
 		app.MinSize(unit.Dp(720), unit.Dp(480)),
 	)
 
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		if !ui.heapWritten {
+			ui.writeHeapProfile()
+		}
+		os.Exit(0)
+	}()
+
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- ui.eventLoop()
 	}()
 
 	app.Main()
+	if !ui.heapWritten {
+		ui.writeHeapProfile()
+	}
 	return <-errCh
 }
 
@@ -357,6 +406,9 @@ func (ui *UI) eventLoop() error {
 				ui.embedPlayer.Stop()
 				ui.embedPlayer.Close()
 				ui.embedPlayer = nil
+			}
+			if !ui.heapWritten {
+				ui.writeHeapProfile()
 			}
 			if e.Err != nil {
 				os.Exit(1)
@@ -432,6 +484,7 @@ func (ui *UI) eventLoop() error {
 						if ui.debugPlaySeconds > 0 {
 							go func() {
 								time.Sleep(time.Duration(ui.debugPlaySeconds) * time.Second)
+								ui.writeHeapProfile()
 								ui.sendAction(func() {
 									ui.closeWatchPage()
 								})
@@ -604,6 +657,9 @@ func (ui *UI) signOutAccount() {
 }
 
 func (ui *UI) switchTab(t Tab) {
+	if ui.state.CurrentTab != t {
+		ui.dropThumbnails()
+	}
 	ui.state.SwitchTab(t)
 	switch t {
 	case TabHome:
@@ -674,6 +730,7 @@ func (ui *UI) search(query string) {
 	if query == "" {
 		return
 	}
+	ui.dropThumbnails()
 	ui.state.CurrentTab = TabSearch
 	ui.state.Status = fmt.Sprintf("Searching %q…", query)
 	go func() {
@@ -922,6 +979,16 @@ func (ui *UI) toggleWatchLater(v yt.Video) {
 	if ui.state.CurrentTab == TabWatchLater {
 		ui.state.SetVideos(ui.store.WatchLater())
 	}
+}
+
+func (ui *UI) dropThumbnails() {
+	if ui.thumbs != nil {
+		ui.thumbs.Clear()
+	}
+	ui.imageOps = make(map[string]paint.ImageOp)
+	ui.requestedMu.Lock()
+	ui.requested = make(map[string]bool)
+	ui.requestedMu.Unlock()
 }
 
 func (ui *UI) requestThumbnail(vid string) {
@@ -1574,17 +1641,17 @@ func (ui *UI) layoutCardGrid(gtx layout.Context) layout.Dimensions {
 
 	numRows := (len(videos) + columns - 1) / columns
 
-	// Thumbnail prefetching: only visible rows plus 10 margin.
+	// Thumbnail prefetching: visible rows plus 2 rows margin.
 	firstRow := ui.gridList.Position.First
 	countRows := ui.gridList.Position.Count
 	if countRows == 0 {
 		countRows = 4
 	}
-	startIdx := (firstRow - 10) * columns
+	startIdx := (firstRow - 2) * columns
 	if startIdx < 0 {
 		startIdx = 0
 	}
-	endIdx := (firstRow + countRows + 10) * columns
+	endIdx := (firstRow + countRows + 2) * columns
 	if endIdx > len(videos) {
 		endIdx = len(videos)
 	}
@@ -1747,6 +1814,8 @@ func (ui *UI) layoutCardThumbnail(gtx layout.Context, v yt.Video, w, h int, isSe
 		}
 		imgOp = op
 		hasImg = true
+	} else {
+		delete(ui.imageOps, v.ID)
 	}
 
 	rrect := clip.UniformRRect(image.Rectangle{Max: boxSize}, gtx.Dp(12))
@@ -1851,17 +1920,17 @@ func (ui *UI) layoutSearchList(gtx layout.Context) layout.Dimensions {
 		ui.searchClockClicks = append(ui.searchClockClicks, widget.Clickable{})
 	}
 
-	// Request thumbnails for visible rows plus 10 margin.
+	// Request thumbnails for visible rows plus 3 margin.
 	first := ui.searchList.Position.First
 	count := ui.searchList.Position.Count
 	if count == 0 {
 		count = 6
 	}
-	start := first - 10
+	start := first - 3
 	if start < 0 {
 		start = 0
 	}
-	end := first + count + 10
+	end := first + count + 3
 	if end > len(videos) {
 		end = len(videos)
 	}
@@ -2038,11 +2107,11 @@ func (ui *UI) layoutSubscriptionsView(gtx layout.Context) layout.Dimensions {
 	if countRows == 0 {
 		countRows = 4
 	}
-	startIdx := (firstRow - 10) * columns
+	startIdx := (firstRow - 2) * columns
 	if startIdx < 0 {
 		startIdx = 0
 	}
-	endIdx := (firstRow + countRows + 10) * columns
+	endIdx := (firstRow + countRows + 2) * columns
 	if endIdx > len(videos) {
 		endIdx = len(videos)
 	}
@@ -2684,6 +2753,7 @@ func (ui *UI) toggleFullscreen() {
 }
 
 func (ui *UI) openWatchPage(v yt.Video) {
+	ui.dropThumbnails()
 	ui.watchVideo = v
 	if ui.state.CurrentTab != TabWatch {
 		ui.previousTab = ui.state.CurrentTab
@@ -2772,12 +2842,8 @@ func (ui *UI) closeWatchPage() {
 	}
 	ui.upNextVideos = nil
 	ui.watchVideo = yt.Video{}
-	if ui.thumbs != nil {
-		ui.thumbs.Clear()
-	}
-	ui.imageOps = make(map[string]paint.ImageOp)
+	ui.dropThumbnails()
 	runtime.GC()
-	debug.FreeOSMemory()
 	if ui.debug {
 		fmt.Fprintf(os.Stderr, "watch page closed\n")
 	}
@@ -3232,6 +3298,23 @@ func (ui *UI) layoutUpNextList(gtx layout.Context, widthPx int) layout.Dimension
 
 	for len(ui.upNextClicks) < len(videos) {
 		ui.upNextClicks = append(ui.upNextClicks, widget.Clickable{})
+	}
+
+	first := ui.upNextList.Position.First
+	count := ui.upNextList.Position.Count
+	if count == 0 {
+		count = 6
+	}
+	start := first - 2
+	if start < 0 {
+		start = 0
+	}
+	end := first + count + 2
+	if end > len(videos) {
+		end = len(videos)
+	}
+	for i := start; i < end; i++ {
+		ui.requestThumbnail(videos[i].ID)
 	}
 
 	gtx.Constraints.Min.X = widthPx

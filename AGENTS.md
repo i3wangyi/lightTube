@@ -4,7 +4,9 @@
 - Run Go through mise: `mise exec -- go ...`. Go 1.27.
 - Build with `make build` / the tags Makefile prints (detected per SPEC: `novulkan` when Vulkan headers are missing, `nox11` when X11 libraries are missing; on this machine: `-tags novulkan`).
 - Do not add dependencies beyond the standard library, `gioui.org`, and the
-  `golang.org/x/...` modules Gio pulls in. Ask first if you think you need one.
+  `golang.org/x/...` modules Gio pulls in, and `github.com/go-text/typesetting`
+  (Gio's font library, used directly to parse one face of a font collection).
+  Ask first if you think you need one.
 - cgo is allowed only in `internal/embed`, and only against system libraries
   through pkg-config: `mpv`, `wayland-client`, `wayland-egl`, `egl`. Do not use
   a Go mpv binding module.
