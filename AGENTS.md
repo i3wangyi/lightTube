@@ -12,6 +12,10 @@
   (`hyprctl monitors -j | grep dpms` shows `true`). Always run `timeout 10 grim ...`.
   If the display is off, skip screenshots and say so. Close every window and
   process you start.
+- Never send simulated key or mouse input to the screen (wtype, ydotool,
+  hyprctl sendshortcut): the user works on this display and the input can
+  reach their windows. Test input handling headless with Gio's
+  `input.Router` (see `internal/ui/keys_test.go`).
 - Never log or print cookie values.
 - Do not edit files outside this directory. Do not install system packages.
 - Do not commit. The reviewer commits after checking your work.
