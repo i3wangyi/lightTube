@@ -924,18 +924,24 @@ func (ui *UI) layout(gtx layout.Context) layout.Dimensions {
 	}
 
 	// Register global key shortcuts.
-	event.Op(gtx.Ops, ui.windowTag)
-	for {
-		evt, ok := gtx.Event(
-			key.Filter{Name: "1", Required: key.ModShortcut},
-			key.Filter{Name: "2", Required: key.ModShortcut},
-			key.Filter{Name: "3", Required: key.ModShortcut},
-			key.Filter{Name: "4", Required: key.ModShortcut},
-			key.Filter{Name: "5", Required: key.ModShortcut},
-			key.Filter{Name: "L", Required: key.ModShortcut},
-			key.Filter{Name: "l", Required: key.ModShortcut},
-			key.Filter{Name: "V", Required: key.ModShortcut},
-			key.Filter{Name: "v", Required: key.ModShortcut},
+	// Key events go to the first gtx.Event call whose filter matches, and this
+	// runs before the editors read theirs. So while an editor has focus, ask
+	// only for Ctrl (Cmd) shortcuts and Esc; else Enter and the arrows never reach it.
+	editorFocused := gtx.Focused(&ui.searchEditor) || gtx.Focused(&ui.addChannelEditor) || gtx.Focused(&ui.csvPathEditor) || gtx.Focused(&ui.accountBrowserEditor)
+	filters := []event.Filter{
+		key.Filter{Name: "1", Required: key.ModShortcut},
+		key.Filter{Name: "2", Required: key.ModShortcut},
+		key.Filter{Name: "3", Required: key.ModShortcut},
+		key.Filter{Name: "4", Required: key.ModShortcut},
+		key.Filter{Name: "5", Required: key.ModShortcut},
+		key.Filter{Name: "L", Required: key.ModShortcut},
+		key.Filter{Name: "l", Required: key.ModShortcut},
+		key.Filter{Name: "V", Required: key.ModShortcut},
+		key.Filter{Name: "v", Required: key.ModShortcut},
+		key.Filter{Name: key.NameEscape},
+	}
+	if !editorFocused {
+		filters = append(filters,
 			key.Filter{Name: key.NameUpArrow},
 			key.Filter{Name: key.NameDownArrow},
 			key.Filter{Name: key.NameLeftArrow},
@@ -957,16 +963,19 @@ func (ui *UI) layout(gtx layout.Context) layout.Dimensions {
 			key.Filter{Name: "m"},
 			key.Filter{Name: "F"},
 			key.Filter{Name: "f"},
-			key.Filter{Name: key.NameEscape},
 			key.Filter{Name: "O"},
 			key.Filter{Name: "o"},
 		)
+	}
+	event.Op(gtx.Ops, ui.windowTag)
+	for {
+		evt, ok := gtx.Event(filters...)
 		if !ok {
 			break
 		}
 
 		if ke, ok := evt.(key.Event); ok && ke.State == key.Press {
-			isEditorFocused := gtx.Focused(&ui.searchEditor) || gtx.Focused(&ui.addChannelEditor) || gtx.Focused(&ui.csvPathEditor) || gtx.Focused(&ui.accountBrowserEditor)
+			isEditorFocused := editorFocused
 			if ui.state.CurrentTab == TabWatch {
 				action, tab, delta := ResolveWatchKeyAction(ke.Name, ke.Modifiers, isEditorFocused)
 				switch action {
