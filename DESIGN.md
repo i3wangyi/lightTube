@@ -299,9 +299,13 @@ Measured 2026-10-19 (yt-dlp 2026.08.19, mpv 0.41):
   phase).
 
 ### Player (in-window), as close to YouTube as practical
-- Controls bar over the bottom of the video with a dark gradient, shown on
-  mouse move and while paused, hidden 3 s after the last move while playing
-  (the cursor hides too). Left: play/pause, next (plays the first Up next),
+- Wayland limit: the video is a subsurface above the Gio window, so Gio
+  cannot draw over it. The controls bar stays directly below the video
+  (as in phase 5). In fullscreen it is a strip below the video area, shown
+  on mouse move and while paused, hidden 3 s after the last move (the cursor
+  hides too). Anything that must appear inside the video (bezel icons,
+  buffering spinner, "Resumed at", autoplay countdown text, captions) is
+  drawn by mpv itself: OSD messages / osd-overlay (ASS) and subtitles. Left: play/pause, next (plays the first Up next),
   volume button with a slider that opens on hover, time "0:42 / 12:34",
   chapter title "• Introduction >" (click opens the chapters list). Right:
   autoplay toggle, CC, settings gear, theater mode, fullscreen.
@@ -451,3 +455,31 @@ badge; persisted.
 with attribution in testdata/demo/ASSETS.md, fictional titles/creators from
 the reference, labelled "Demo"); nothing personal, no network. Live mode
 never shows demo records. vinyl.jpg shows archival photographs.
+
+### Acceptance details from the design review (2026-10-19, Version 6)
+- Podcasts and Music keep the real video visible while playing; never
+  replace an active video with artwork. The compact player/dock must be a
+  usable player (controls below the video) or playback pauses.
+- `--demo` is isolated and deterministic: no account or cookie loading, no
+  yt-dlp, suggestions, feeds or network, no media launch (playback disabled
+  with a visible "Playback disabled in demo" state, or a stub). It never
+  reads or writes the user's live data; use a separate XDG environment.
+- Shorts identity only from provenance: a canonical watch URL returned by a
+  Shorts tab or the Shorts search filter is a Short. Empty, invalid or
+  changed upstream responses give honest empty/error states. Tests use
+  fixtures, never current signed-in results.
+- "Open full video" only when a real source link exists (for example the
+  Short's description or YouTube's related-video field); never by matching
+  title or topic. Opening the same Short in Watch is labelled "Open this
+  Short in Watch".
+- Broad search is labelled "All YouTube", is visibly separate from the
+  space's own results, and never labels global results as Podcast, Music or
+  Short. Returning to a space restores its own query, chip and scroll.
+- Account switch and sign-out cancel or invalidate pending per-space loads
+  (generation counter); queues, positions and results never cross accounts
+  (positions.json per account). Tests with delayed responses.
+- Measure idle CPU and RSS with ambient on and off, on the demo dataset,
+  against the pre-redesign build on the same dataset. Ambient shapes are
+  fixed and cached; no per-frame blur or image work. Report any unmet target.
+- Grid columns follow the width (keep card width usable); report the real
+  minimum width. Existing shortcuts stay; Alt+1..4 select spaces.
