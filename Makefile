@@ -1,6 +1,8 @@
 GO ?= mise exec -- go
 PREFIX ?= $(HOME)/.local
 DESTDIR ?=
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "0.1.0")
+ARCH ?= $(shell uname -m)
 
 # Auto-detect build tags if not specified on the command line.
 # novulkan: added when /usr/include/vulkan/vulkan.h is missing
@@ -21,12 +23,17 @@ ifeq ($(origin TAGS), undefined)
 endif
 
 TAGS_FLAG := $(if $(strip $(TAGS)),-tags $(strip $(TAGS)))
+LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: build test vet fmt check install uninstall clean
+DISTNAME := lighttube-$(VERSION)-linux-$(ARCH)
+DISTDIR := dist/$(DISTNAME)
+TARBALL := dist/$(DISTNAME).tar.gz
+
+.PHONY: build test vet fmt check install uninstall clean dist
 
 build:
 	@echo "Building with tags: $(TAGS)"
-	$(GO) build $(TAGS_FLAG) -trimpath -ldflags='-s -w' -o lighttube ./cmd/lighttube
+	$(GO) build $(TAGS_FLAG) -trimpath -ldflags='$(LDFLAGS)' -o lighttube ./cmd/lighttube
 
 test:
 	$(GO) test $(TAGS_FLAG) ./...
@@ -52,5 +59,19 @@ uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/share/applications/lighttube.desktop
 	rm -f $(DESTDIR)$(PREFIX)/share/icons/hicolor/scalable/apps/lighttube.svg
 
+dist: build
+	@rm -rf $(DISTDIR) $(TARBALL)
+	@mkdir -p $(DISTDIR)/contrib dist
+	cp lighttube $(DISTDIR)/
+	cp contrib/lighttube.desktop $(DISTDIR)/contrib/
+	cp contrib/lighttube.svg $(DISTDIR)/contrib/
+	cp contrib/hyprland.lua $(DISTDIR)/contrib/
+	cp README.md $(DISTDIR)/
+	cp scripts/install.sh $(DISTDIR)/install.sh
+	chmod +x $(DISTDIR)/install.sh
+	tar -czf $(TARBALL) -C dist $(DISTNAME)
+	@rm -rf $(DISTDIR)
+	@echo "Created $(TARBALL)"
+
 clean:
-	rm -f lighttube
+	rm -rf lighttube dist

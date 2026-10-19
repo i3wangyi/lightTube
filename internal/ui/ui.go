@@ -2710,7 +2710,7 @@ func (ui *UI) openWatchPage(v yt.Video) {
 	}
 
 	if ui.embedPlayer == nil {
-		p, err := embed.New(ui.view.Display(), ui.view.Surface())
+		p, err := ui.createEmbedPlayer()
 		if err != nil {
 			ui.state.CurrentTab = ui.previousTab
 			ui.playVideoExternal(v, false)

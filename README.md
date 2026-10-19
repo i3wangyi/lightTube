@@ -152,7 +152,34 @@ Measured on a MacBookPro12,1 (Intel Broadwell, Iris 6100) in October 2026:
 - Memory (RSS): about 115 MB idle. This is above the 90 MB target in SPEC.md.
 - At most 100 decoded thumbnails are kept in memory.
 
+## Platform Support
+
+| Platform | In-Window Playback | External Player | Status |
+| --- | --- | --- | --- |
+| Linux (Wayland) | Supported (subsurface) | Supported | In-window, tested |
+| Linux (X11) | Supported (X11 child window) | Supported | In-window, tested under Xwayland |
+| Windows | Written, never run (Win32 child window, needs `mpv-2.dll`; the child window may block the main window, see `internal/embed/embed_windows.go`) | Written, never run | Builds in CI only |
+| macOS | No (falls back to external mpv) | Written, never run | Builds in CI only |
+
+### macOS Note
+
+On macOS, the app falls back to the external mpv player automatically. A native bundled macOS application (`.app`) and in-window NSView embedded player are planned for a later phase.
+
+## Distribution and Packaging
+
+- **Linux Tarball**: Run `make dist` to create `dist/lighttube-<version>-linux-<arch>.tar.gz`. The tarball contains the `lighttube` binary, `contrib/lighttube.desktop`, `contrib/lighttube.svg`, `contrib/hyprland.lua`, `README.md`, and `install.sh` (installs to `~/.local` identically to `make install`).
+- **Windows Zip**: Run `powershell -ExecutionPolicy Bypass -File scripts/package-windows.ps1` to produce `dist/lighttube-<version>-windows-x86_64.zip`. To enable embedded playback on Windows, download `mpv-2.dll` and place it in the same folder as `lighttube.exe`.
+
+## Continuous Integration
+
+GitHub Actions workflow (`.github/workflows/ci.yml`) runs on push and pull requests across three platforms:
+1. `ubuntu-latest`: Installs development headers (`libwayland-dev`, `libx11-xcb-dev`, `libxkbcommon-x11-dev`, `libxcursor-dev`, `libxfixes-dev`, `libegl1-mesa-dev`, `libvulkan-dev`, `libmpv-dev`) and runs `make check`.
+2. `windows-latest`: Builds without cgo (`CGO_ENABLED=0`) and runs `go vet ./...`.
+3. `macos-latest`: Builds `./cmd/lighttube` and runs tests on non-GUI packages.
+
+When git tags matching `v*` are pushed, release artifacts from `make dist` (Linux) and the Windows zip are automatically uploaded.
+
 ## Known Limits
 
-- Linux Wayland only: Current builds require Wayland subsurfaces and Wayland window classes (multi-platform support for X11, macOS, and Windows is scheduled for Phase 7).
 - No emoji font: Renders Latin and CJK characters using system Noto fonts, but emoji glyphs are not displayed.
+

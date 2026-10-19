@@ -1,3 +1,4 @@
 /lighttube
 /bin/
 *.test
+/dist/

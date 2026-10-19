@@ -14,19 +14,16 @@ import (
 	"image"
 	"runtime"
 	"runtime/debug"
-	"sync"
 	"unsafe"
 )
 
-// Player controls libmpv OpenGL rendering to a Wayland subsurface.
-type Player struct {
-	mu     sync.Mutex
+type waylandBackend struct {
 	ctx    *C.embed_context
 	active bool
 }
 
-// New creates an embed Player using the Wayland display and parent surface pointers.
-func New(display, surface unsafe.Pointer) (*Player, error) {
+// NewWayland creates an embed Player using the Wayland display and parent surface pointers.
+func NewWayland(display, surface unsafe.Pointer) (*Player, error) {
 	if display == nil || surface == nil {
 		return nil, errors.New("embed: nil display or surface pointer")
 	}
@@ -36,15 +33,21 @@ func New(display, surface unsafe.Pointer) (*Player, error) {
 		return nil, errors.New("embed: failed to create wayland embed context")
 	}
 
-	return &Player{ctx: ctx}, nil
+	return newPlayer(&waylandBackend{ctx: ctx}), nil
 }
 
-// Play starts playback of the given URL with mpv options.
-func (p *Player) Play(opts PlayOptions) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+// New creates an embed Player using the Wayland display and parent surface pointers.
+func New(display, surface unsafe.Pointer) (*Player, error) {
+	return NewWayland(display, surface)
+}
 
-	if p.ctx == nil {
+// NewWin32 is unsupported on Linux.
+func NewWin32(hwnd uintptr) (*Player, error) {
+	return nil, ErrUnsupported
+}
+
+func (b *waylandBackend) Play(opts PlayOptions) error {
+	if b.ctx == nil {
 		return errors.New("embed: player context is closed")
 	}
 
@@ -86,7 +89,7 @@ func (p *Player) Play(opts PlayOptions) error {
 	}
 
 	ret := C.embed_player_start(
-		p.ctx,
+		b.ctx,
 		cURL,
 		cTitle,
 		cFormat,
@@ -102,29 +105,21 @@ func (p *Player) Play(opts PlayOptions) error {
 		return errors.New("embed: failed to start embedded playback")
 	}
 
-	p.active = true
+	b.active = true
 	return nil
 }
 
-// Stop ends playback and tears down mpv and EGL subsurface resources.
-func (p *Player) Stop() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if p.ctx != nil && p.active {
-		C.embed_player_stop(p.ctx)
-		p.active = false
+func (b *waylandBackend) Stop() {
+	if b.ctx != nil && b.active {
+		C.embed_player_stop(b.ctx)
+		b.active = false
 		runtime.GC()
 		debug.FreeOSMemory()
 	}
 }
 
-// SetRect updates the subsurface video rectangle (in physical pixel coordinates) and buffer scale.
-func (p *Player) SetRect(rect image.Rectangle, scale int) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if p.ctx == nil || !p.active {
+func (b *waylandBackend) SetRect(rect image.Rectangle, scale int) {
+	if b.ctx == nil || !b.active {
 		return
 	}
 
@@ -137,82 +132,54 @@ func (p *Player) SetRect(rect image.Rectangle, scale int) {
 	x := rect.Min.X
 	y := rect.Min.Y
 
-	C.embed_player_set_rect(p.ctx, C.int(x), C.int(y), C.int(w), C.int(h), C.int(scale))
+	C.embed_player_set_rect(b.ctx, C.int(x), C.int(y), C.int(w), C.int(h), C.int(scale))
 }
 
-// SetHidden unmaps or maps the subsurface and pauses playback when hidden.
-func (p *Player) SetHidden(hidden bool) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if p.ctx == nil || !p.active {
+func (b *waylandBackend) SetHidden(hidden bool) {
+	if b.ctx == nil || !b.active {
 		return
 	}
 
-	C.embed_player_set_hidden(p.ctx, C.bool(hidden))
+	C.embed_player_set_hidden(b.ctx, C.bool(hidden))
 }
 
-// TogglePause toggles playback pause state.
-func (p *Player) TogglePause() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if p.ctx != nil && p.active {
-		C.embed_player_toggle_pause(p.ctx)
+func (b *waylandBackend) TogglePause() {
+	if b.ctx != nil && b.active {
+		C.embed_player_toggle_pause(b.ctx)
 	}
 }
 
-// SetPause sets playback pause state.
-func (p *Player) SetPause(paused bool) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if p.ctx != nil && p.active {
-		C.embed_player_set_pause(p.ctx, C.bool(paused))
+func (b *waylandBackend) SetPause(paused bool) {
+	if b.ctx != nil && b.active {
+		C.embed_player_set_pause(b.ctx, C.bool(paused))
 	}
 }
 
-// Seek seeks playback by relative or absolute seconds.
-func (p *Player) Seek(seconds float64, relative bool) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if p.ctx != nil && p.active {
-		C.embed_player_seek(p.ctx, C.double(seconds), C.bool(relative))
+func (b *waylandBackend) Seek(seconds float64, relative bool) {
+	if b.ctx != nil && b.active {
+		C.embed_player_seek(b.ctx, C.double(seconds), C.bool(relative))
 	}
 }
 
-// SetVolume sets playback audio volume (0-100).
-func (p *Player) SetVolume(volume float64) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if p.ctx != nil && p.active {
-		C.embed_player_set_volume(p.ctx, C.double(volume))
+func (b *waylandBackend) SetVolume(volume float64) {
+	if b.ctx != nil && b.active {
+		C.embed_player_set_volume(b.ctx, C.double(volume))
 	}
 }
 
-// ToggleMute toggles audio mute state.
-func (p *Player) ToggleMute() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if p.ctx != nil && p.active {
-		C.embed_player_toggle_mute(p.ctx)
+func (b *waylandBackend) ToggleMute() {
+	if b.ctx != nil && b.active {
+		C.embed_player_toggle_mute(b.ctx)
 	}
 }
 
-// Status reads current playback status from libmpv.
-func (p *Player) Status() Status {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if p.ctx == nil || !p.active {
+func (b *waylandBackend) Status() Status {
+	if b.ctx == nil || !b.active {
 		return Status{}
 	}
 
 	var cStat C.embed_status
-	C.embed_player_get_status(p.ctx, &cStat)
+	C.embed_player_get_status(b.ctx, &cStat)
 
 	return Status{
 		TimePos:      float64(cStat.time_pos),
@@ -225,18 +192,13 @@ func (p *Player) Status() Status {
 		IsPlaying:    bool(cStat.is_playing),
 		EOFReached:   bool(cStat.eof_reached),
 	}
-
 }
 
-// Close destroys the embed context and all underlying resources.
-func (p *Player) Close() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if p.ctx != nil {
-		C.embed_context_destroy(p.ctx)
-		p.ctx = nil
-		p.active = false
+func (b *waylandBackend) Close() {
+	if b.ctx != nil {
+		C.embed_context_destroy(b.ctx)
+		b.ctx = nil
+		b.active = false
 		runtime.GC()
 		debug.FreeOSMemory()
 	}

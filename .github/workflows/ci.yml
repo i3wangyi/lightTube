@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches: ["*"]
+    tags: ["v*"]
+  pull_request:
+    branches: ["*"]
+
+jobs:
+  ubuntu-latest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwayland-dev \
+            libx11-xcb-dev \
+            libxkbcommon-x11-dev \
+            libxcursor-dev \
+            libxfixes-dev \
+            libegl1-mesa-dev \
+            libvulkan-dev \
+            libmpv-dev
+
+      - name: Run checks
+        run: make check GO=go
+
+      - name: Build distribution tarball
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: make dist GO=go
+
+      - name: Upload Linux artifact
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: lighttube-linux
+          path: dist/*.tar.gz
+
+  windows-latest:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build and vet
+        env:
+          CGO_ENABLED: 0
+        run: |
+          go build ./cmd/lighttube
+          go vet ./...
+
+      - name: Package Windows zip
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: .\scripts\package-windows.ps1
+
+      - name: Upload Windows artifact
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: lighttube-windows
+          path: dist/*.zip
+
+  macos-latest:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: go build ./cmd/lighttube
+
+      - name: Test non-GUI packages
+        run: go test -v ./internal/player ./internal/store ./internal/yt ./internal/platform ./internal/thumbs
