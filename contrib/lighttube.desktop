@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=lightTube
+GenericName=YouTube client
+Comment=Small, fast YouTube client
+Exec=lighttube
+Icon=lighttube
+Terminal=false
+Categories=AudioVideo;Video;Player;
+StartupWMClass=lighttube
