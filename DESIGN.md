@@ -208,7 +208,7 @@ params (they cannot be built by hand).
   leaving the card cancels it.
 - If there is no storyboard, keep the still thumbnail. Never block the UI.
 
-## Phase 9: accounts, playlists, typeahead, mixed search
+## Phase 9: accounts, playlists, typeahead
 
 Measured 2026-10-19 (yt-dlp 2026.08.19):
 - `--cookies-from-browser BROWSER[+KEYRING][:PROFILE]` accepts a profile
@@ -259,15 +259,6 @@ Measured 2026-10-19 (yt-dlp 2026.08.19):
   Enter searches the selected row (or the typed text), Esc closes, click
   searches. The box keeps focus. No request for empty text or URLs.
 
-### Mixed search results
-- One search runs three yt-dlp requests in parallel: videos (as today),
-  channels (`sp=EgIQAg==`, first 3), playlists (`sp=EgIQAw==`, first 3).
-  Show videos as soon as they arrive; add the others when they arrive.
-- Chips above the results: All, Videos, Shorts, Channels, Playlists.
-  All: channel rows first (avatar 96 dp circle, name, subscriber count,
-  "Subscribe" button for local subscriptions), then videos, with a
-  "Playlists" shelf after the 4th video. Shorts: runs the Shorts filter on
-  demand ("Loading Shorts…"), shows 9:16 cards. Results whose URL has
-  /shorts/ get a "SHORTS" badge in every list.
-- Channel click: the channel's recent videos (RSS) with a header.
-  Playlist click: as saved playlists.
+### Mixed search results — dropped (2026-10-19)
+The user chose to keep search to normal videos. Do not add channel,
+playlist or Shorts search results.
