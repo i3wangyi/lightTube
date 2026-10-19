@@ -263,7 +263,10 @@ Measured 2026-10-19 (yt-dlp 2026.08.19):
 The user chose to keep search to normal videos. Do not add channel,
 playlist or Shorts search results.
 
-## Phase 10: watch page like YouTube, comments, captions, chapters, downloads, channel pages
+## Phase 11: watch page like YouTube, comments, captions, chapters, downloads, channel pages
+
+Runs after Phase 10 (four spaces), on the new shell: 11a player and watch
+metadata, 11b comments and channel pages, 11c downloads.
 
 Measured 2026-10-19 (yt-dlp 2026.08.19, mpv 0.41):
 - `yt-dlp --cookies <f> -J --skip-download <video>` (about 6 s): `chapters`
@@ -360,3 +363,91 @@ Measured 2026-10-19 (yt-dlp 2026.08.19, mpv 0.41):
   (9:16 cards), Live, Playlists. Each tab loads on first open, 30 items,
   "Show more" loads 30 more (--playlist-start/--playlist-end), cache 1 h.
 - Back (Esc, mouse back button) returns to the page before.
+
+## Phase 10: four spaces redesign
+
+Source of truth for the visual design: the published reference
+(claude.ai artifact 6ufKKKFDcE9v4pmpYmyq68, Version 5) and its design
+document (B1sXC7rsPUuSjjP6pEUpQp). The .dc.html files are design-editor
+components: translate them to Gio; never add a browser UI. The design
+session (the design review session) does the acceptance review. This section replaces
+the older colors and the 72 dp guide as the default shell; keys, data,
+playback and performance rules above still apply.
+
+### Tokens (replace the phase 3 table)
+bg #0f0f0f, surface #181818, raised #272727, hover #353535, border #383838,
+text #f1f1f1, text2 #aaaaaa, accent #ff0033 (playback progress, active nav
+icon, live dot), action #c90028 (red buttons with text: Subscribe, Sign in,
+primary actions; replaces #ff0000), overlay rgba(0,0,0,.72). Thumbnail
+radius 11 dp, search pill radius 28 dp, min interactive target 44 dp.
+Ambient glow: watch rgba(88,126,161,.28), music rgba(80,57,134,.20). Fonts:
+keep the explicit Noto collection (Roboto in the reference is not a reason
+to scan or add fonts).
+
+### Shell
+- Left rail 216 dp: small "LT" red mark + "LightTube" (no heavy wordmark,
+  no "official" claims). "Your spaces": Watch, Shorts, Podcasts, Music (icon
+  + label, 48 dp rows; active = raised bg and accent icon). Divider. Then the
+  utilities: Library (Watch later, History, saved playlists, downloads later),
+  Subscriptions (manage), You (accounts, settings).
+- Below 1050 dp window width the rail collapses to the 72 dp icon guide
+  (same items). Report the real minimum width in the summary.
+- Top bar: "<Space> space" label (hidden when narrow), the pill search with
+  placeholder "Search <space>", library button, profile circle.
+- Heading per space: title, subtitle, a status badge, "Ambient on/off"
+  badge-button. Then filter chips (raised; active = text bg, bg text).
+
+### Spaces (real data only; demo data only with --demo)
+- Watch: chips For you (account Home feed), Following (subscriptions feed),
+  Continue (videos with a stored position not finished), Saved (Watch later
+  + saved playlists). Hero on For you without a query: the latest unfinished
+  video (paused, real thumbnail, "Continue watching", resume time), else the
+  first feed item. Then the 3-column landscape grid (2 at medium, 1 narrow).
+- Shorts: chips Following (merge the /shorts tab of followed channels, cap
+  15 channels, newest first, cache 1 h), Saved, Explore (explicit
+  unsupported state: "YouTube does not offer a Shorts feed to this app").
+  Stage: one 9:16 portrait (max 320x565 dp) with previous/next buttons,
+  starts muted with captions on, plays in the visible player inside the
+  portrait. Side panel "More to explore" and "Open full video in Watch"
+  (switches to Watch, selects the video, does not autoplay). Classify as a
+  Short only by source (Shorts tab, /shorts/ URL, Shorts search filter).
+- Podcasts: chips Your shows (account feed/podcasts), New episodes (latest
+  episode of each show), Continue (episodes with a stored position). Square
+  show art grid (4 columns, 2 narrow), then ordered episode rows (68x50 art,
+  title, show and episode number, resume bar, "N min left" or "Played").
+  Its own queue = the show order.
+- Music: chips Liked (list=LM), Albums (from the last Music search),
+  Saved. Feature block (album art 196 dp, title, artist, Open/Save), numbered
+  track rows (art 44 dp, title, artist, collection, duration), a dock with
+  the current track (visible player). Its own queue = the track order.
+  Note in README: yt-dlp marks YouTube Music as not directly supported.
+- Search is scoped: Watch = video search; Shorts = Shorts filter search
+  (slow; show "Searching Shorts…"); Podcasts = filter the followed shows and
+  their episodes, plus YouTube search for "<q> podcast" playlists; Music =
+  music.youtube.com search. The typeahead adds a last row "Search all of
+  YouTube for '<q>'" that switches to Watch results.
+
+### State and playback rules
+- Each space keeps its own chip, query, scroll, selection, queue and resume
+  item; switching restores them.
+- One player. Switching spaces pauses the visible player and keeps its
+  position; nothing starts on switch or on return. No hidden or background
+  audio: Podcasts and Music play in the visible player/dock.
+- Stored positions (new store file positions.json: id -> seconds, duration,
+  updated) feed Continue, resume bars and "Played" (>= 95 %).
+- Keys: Ctrl+1..5 keep their targets (Home -> Watch/For you, Subscriptions ->
+  Watch/Following, Watch later -> Library, History -> Library, You). New
+  Alt+1..4 select Watch, Shorts, Podcasts, Music. Player keys unchanged.
+
+### Ambient
+A static glow behind the hero (Watch) and the feature block (Music) only,
+drawn as a blurred-looking shape from the fixed tokens (layered rounded
+rects with falling alpha); no image sampling, no animation, no timer, no
+extra redraws. Setting "Ambient" (default on) in Settings and the heading
+badge; persisted.
+
+### Demo state for visual acceptance
+`--demo` loads testdata/demo (the 12 stock JPEGs from the design hand-off
+with attribution in testdata/demo/ASSETS.md, fictional titles/creators from
+the reference, labelled "Demo"); nothing personal, no network. Live mode
+never shows demo records. vinyl.jpg shows archival photographs.
