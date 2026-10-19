@@ -262,3 +262,101 @@ Measured 2026-10-19 (yt-dlp 2026.08.19):
 ### Mixed search results — dropped (2026-10-19)
 The user chose to keep search to normal videos. Do not add channel,
 playlist or Shorts search results.
+
+## Phase 10: watch page like YouTube, comments, captions, chapters, downloads, channel pages
+
+Measured 2026-10-19 (yt-dlp 2026.08.19, mpv 0.41):
+- `yt-dlp --cookies <f> -J --skip-download <video>` (about 6 s): `chapters`
+  (start_time, end_time, title), `automatic_captions` (157 languages on the
+  test video; `subtitles` may be empty), `like_count`, `comment_count`,
+  `channel_follower_count`, description, formats ladder 144p-1080p for avc1
+  (1440p/2160p only vp9/av01).
+- Comments: `--write-comments --extractor-args
+  "youtube:max_comments=20,20,5,2;comment_sort=top"` gives 20 comments with
+  replies in about 6.6 s; fields author, author_thumbnail, text, like_count,
+  _time_text, parent ("root" or the parent id), is_pinned,
+  author_is_uploader. `comment_sort=new` gives newest.
+- mpv with `ytdl-raw-options=sub-langs=<langs>,write-auto-subs=` adds the
+  captions as external sub tracks (off until `sid` is set). mpv's
+  `chapter-list` property has the chapters during playback.
+- Channel: `<channel url>` -J --flat-playlist gives the header (title,
+  channel_follower_count, description, thumbnails: avatar and banner up to
+  2560 px wide); tabs `/videos` (30 in 1.3 s), `/shorts` (0.9 s),
+  `/playlists` (0.9 s), `/streams` (returns null JSON when the channel has
+  none: show "No live streams"). `?sort=p` does not change the order through
+  yt-dlp: no Popular sort.
+
+### Watch page metadata (background, never blocks playback)
+- On open, start playback at once (as today) and in parallel run the -J
+  metadata call (cache per video 1 h). When it arrives: like count,
+  subscriber count, full description (collapsed to 3 lines with "...more"),
+  chapters, caption languages, the format ladder.
+- Description: timestamps (0:00, 1:02:03) and chapter titles are clickable
+  and seek. URLs are shown as text (no click to open a browser in this
+  phase).
+
+### Player (in-window), as close to YouTube as practical
+- Controls bar over the bottom of the video with a dark gradient, shown on
+  mouse move and while paused, hidden 3 s after the last move while playing
+  (the cursor hides too). Left: play/pause, next (plays the first Up next),
+  volume button with a slider that opens on hover, time "0:42 / 12:34",
+  chapter title "• Introduction >" (click opens the chapters list). Right:
+  autoplay toggle, CC, settings gear, theater mode, fullscreen.
+- Progress bar: red played part, #717171 buffered (mpv demuxer-cache-time),
+  gaps between chapters, grows on hover; hover shows a tooltip with the
+  time, the chapter title and the storyboard frame for that time (reuse
+  phase 8 storyboard code, fetched once per video); click and drag seek.
+- Big centered icon flash on play/pause, ±10 s, volume change (YouTube's
+  "bezel"), 500 ms. Spinner while buffering (mpv paused-for-cache or
+  seeking).
+- Settings gear menu: Playback speed (0.25-2, default 1), Quality (Auto =
+  the policy; then the avc1 heights 144p-1080p; vp9/av01 heights marked
+  "software decode" and shown only when the codec policy is not old-gpu),
+  Captions (Off, the languages: original first, then English, then the
+  rest in a scrollable list; auto-translated ones work through sub-langs),
+  Caption size (small/normal/large through sub-scale). Switching quality
+  keeps the time (loadfile with start=<time>).
+- Keys (YouTube): Space/K play-pause, J/L ∓10 s, ←/→ ∓5 s, ↑/↓ volume ±5,
+  M mute, F fullscreen, T theater, C captions on/off, Shift+N next,
+  Shift+P previous, < / > speed ∓0.25, 0-9 seek to 0-90 %, Home/End,
+  , / . frame step while paused, Esc leaves fullscreen.
+- Double-click on the video toggles fullscreen; single click toggles pause.
+- Theater mode: video full width, Up next below. Persist volume, speed,
+  captions on/off and language, theater mode in settings.json.
+- Autoplay: at end, a 5 s countdown card over the video for the first Up
+  next ("Up next in 5 · Cancel"); off when the autoplay toggle is off.
+- Resume: start where the user stopped last time (mpv
+  save-position-on-quit already; show "Resumed at 4:12").
+- Mark watched on YouTube when signed in: pass yt-dlp `--mark-watched`
+  through ytdl-raw-options (`mark-watched=`).
+
+### Comments (below the description; Up next stays right)
+- "N Comments" header, sort chips Top / Newest. Load 20 on first scroll into
+  view (not on open), "Show more" loads 20 more (max_comments grows).
+- Comment row: 40 dp avatar (author_thumbnail, letter fallback), author
+  (pinned and uploader badges), relative time, text (5 lines, "Read more"),
+  like count. "N replies" expands the replies already fetched.
+- Text is plain; timestamps in comments seek like in the description.
+
+### Downloads
+- Watch page "Download" button and card context: choose quality (the avc1
+  ladder; default the policy height) or "Audio only (m4a)". yt-dlp writes to
+  the user's Videos dir + /lightTube (xdg-user-dir VIDEOS on Linux,
+  ~/Movies on macOS, %USERPROFILE%\Videos on Windows), name
+  "<title> [<id>].mp4", with --embed-subs (chosen caption language),
+  --embed-chapters, --embed-thumbnail, cookies copy, --newline progress.
+- At most 2 downloads at once; queue the rest. A "Downloads" item on the You
+  page: list with progress bar, speed, ETA, cancel, "Show in folder" (xdg-open
+  the folder), and play (in-window player with the local file; no network).
+- Downloaded videos are marked with a check badge on cards. Survive restart:
+  state in the data dir; partial downloads resume (yt-dlp --continue).
+
+### Channel page (like YouTube)
+- Open from: avatar or channel name on cards, the watch page, chips, the
+  Subs channel row. Header: banner (widest thumbnail, cropped to 6:1),
+  96 dp avatar, name, "@handle · N subscribers · N videos" when known,
+  description first line, Subscribe (local) button.
+- Tabs: Home (first 12 videos + the playlists shelf), Videos, Shorts
+  (9:16 cards), Live, Playlists. Each tab loads on first open, 30 items,
+  "Show more" loads 30 more (--playlist-start/--playlist-end), cache 1 h.
+- Back (Esc, mouse back button) returns to the page before.
