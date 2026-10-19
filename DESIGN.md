@@ -207,3 +207,67 @@ params (they cannot be built by hand).
   stops it and frees the frames. At most one storyboard fetch in flight;
   leaving the card cancels it.
 - If there is no storyboard, keep the still thumbnail. Never block the UI.
+
+## Phase 9: accounts, playlists, typeahead, mixed search
+
+Measured 2026-10-19 (yt-dlp 2026.08.19):
+- `--cookies-from-browser BROWSER[+KEYRING][:PROFILE]` accepts a profile
+  name or a profile directory path. Chrome lists its profiles in
+  `~/.config/google-chrome/Local State` -> `profile.info_cache`
+  (`name`, `user_name` = signed-in Google account).
+- `https://www.youtube.com/feed/playlists` (with cookies, --flat-playlist -J):
+  37 entries in 1.6 s, including LL (Liked videos) and WL (Watch later).
+- Suggestions: `https://suggestqueries.google.com/complete/search?client=firefox&ds=yt&q=<q>`
+  returns JSON `[q, [10 strings], ...]` in about 0.23 s, no login.
+- `https://www.youtube.com/results?search_query=<q>&sp=<filter>` through
+  yt-dlp: no filter = videos only; `EgIQAg==` channels (1.5 s);
+  `EgIQAw==` playlists (1.5 s); `EgIQCQ==` Shorts (9.5 s, few results).
+
+### Accounts (user-changeable, several accounts)
+- An account = label + browser spec (`chrome+gnomekeyring`, plus a profile
+  name or path) + its own cookie file and feed cache dir. Stored in
+  settings.json. The existing single account becomes account "default"
+  with its current cookie path, so nothing moves.
+- You page: "Accounts" list (label, Google account name when known, active
+  marker), "Switch", "Sign out", "Remove". Switching reloads all feeds.
+- "Add account" offers:
+  1. "Use a browser profile": list profiles found for Chrome, Chromium,
+     Brave, Edge (Local State) and Firefox (profiles.ini), with the signed-in
+     name; pick one, then sign in as today.
+  2. "Sign in with Google": start Chrome (or Chromium/Brave, whichever is
+     installed) with `--user-data-dir=<data>/browsers/<id> --no-first-run
+     --no-default-browser-check` at
+     `https://accounts.google.com/ServiceLogin?service=youtube&continue=https://www.youtube.com/`.
+     When that browser process exits, extract cookies from that directory
+     (`<browser>+<keyring>:<dir>/Default`). This works for any Google account
+     and needs no OAuth client. Show "Finish signing in in the browser window,
+     then close it". Removing the account deletes that directory.
+- Never log cookie values; cookie files stay mode 0600.
+
+### Saved playlists
+- `Account.Playlists(ctx)` from feed/playlists, disk cache, one refresh per
+  page open. You page: "Playlists" grid (title, video count when known,
+  thumbnail of the first video if the entry has one, else surface box).
+- Click opens the playlist (yt-dlp --flat-playlist -J of the playlist URL
+  with cookies, private lists included) as a card grid with a header.
+
+### Typeahead
+- While the search box has focus and text, fetch suggestions 150 ms after
+  the last keystroke; cancel the previous request; cache by prefix (LRU 200).
+- Dropdown under the box: up to 10 rows, 40 dp, magnifier icon + text, the
+  matching prefix in text2 and the rest in text (like YouTube). Up/Down move,
+  Enter searches the selected row (or the typed text), Esc closes, click
+  searches. The box keeps focus. No request for empty text or URLs.
+
+### Mixed search results
+- One search runs three yt-dlp requests in parallel: videos (as today),
+  channels (`sp=EgIQAg==`, first 3), playlists (`sp=EgIQAw==`, first 3).
+  Show videos as soon as they arrive; add the others when they arrive.
+- Chips above the results: All, Videos, Shorts, Channels, Playlists.
+  All: channel rows first (avatar 96 dp circle, name, subscriber count,
+  "Subscribe" button for local subscriptions), then videos, with a
+  "Playlists" shelf after the 4th video. Shorts: runs the Shorts filter on
+  demand ("Loading Shorts…"), shows 9:16 cards. Results whose URL has
+  /shorts/ get a "SHORTS" badge in every list.
+- Channel click: the channel's recent videos (RSS) with a header.
+  Playlist click: as saved playlists.
