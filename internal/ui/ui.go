@@ -49,6 +49,7 @@ type Options struct {
 	ExternalPlayer   bool
 	DebugPlay        string
 	DebugPlaySeconds int
+	DebugTab         string
 }
 
 // UI manages the Gio window, layout, and event interactions.
@@ -113,6 +114,18 @@ type UI struct {
 
 	actionsMu sync.Mutex
 	actions   []func()
+
+	// Settings & GPU capabilities
+	settings           store.Settings
+	cliExternalPlayer  bool
+	cachedCaps         embed.Caps
+	capsLoaded         bool
+	capsErr            error
+	codecAutoChip      widget.Clickable
+	codecOldGPUChip    widget.Clickable
+	codecAnyChip       widget.Clickable
+	playerInplaceChip  widget.Clickable
+	playerExternalChip widget.Clickable
 
 	// Account & Feeds
 	accountSigningIn     bool
@@ -192,6 +205,21 @@ func New(opts Options) *UI {
 		acc = yt.NewAccount()
 	}
 
+	settings := store.DefaultSettings()
+	if opts.Store != nil {
+		settings = opts.Store.Settings()
+		acc.SetBrowser(settings.BrowserSpec)
+	} else if opts.Account != nil && opts.Account.Browser != "" {
+		settings.BrowserSpec = opts.Account.Browser
+	} else {
+		acc.SetBrowser(settings.BrowserSpec)
+	}
+
+	extPlayer := opts.ExternalPlayer
+	if !extPlayer {
+		extPlayer = (settings.Player == store.PlayerExternal)
+	}
+
 	ui := &UI{
 		ytClient:           ytClient,
 		store:              st,
@@ -207,7 +235,9 @@ func New(opts Options) *UI {
 		debug:              opts.Debug,
 		startTime:          opts.StartTime,
 		initialSearch:      opts.Search,
-		externalPlayer:     opts.ExternalPlayer,
+		settings:           settings,
+		cliExternalPlayer:  opts.ExternalPlayer,
+		externalPlayer:     extPlayer,
 		debugPlay:          opts.DebugPlay,
 		debugPlaySeconds:   opts.DebugPlaySeconds,
 		watchLastMouseMove: time.Now(),
@@ -219,6 +249,20 @@ func New(opts Options) *UI {
 		windowTag:          new(int),
 		pasteTag:           new(int),
 	}
+
+	if opts.DebugTab == "you" || opts.DebugTab == "account" {
+		ui.state.CurrentTab = TabAccount
+	}
+
+	go func() {
+		caps, err := embed.DecodeCaps()
+		ui.sendAction(func() {
+			ui.cachedCaps = caps
+			ui.capsLoaded = true
+			ui.capsErr = err
+		})
+		ui.invalidate()
+	}()
 
 	ui.searchEditor.SingleLine = true
 	ui.searchEditor.Submit = true
@@ -358,7 +402,7 @@ func (ui *UI) eventLoop() error {
 						if ui.debugPlay != "" && !ui.debugPlayTriggered {
 							ui.debugPlayTriggered = true
 							go func() {
-								time.Sleep(6 * time.Second)
+								time.Sleep(1 * time.Second)
 								ui.sendAction(func() {
 									ui.triggerDebugPlay(ui.debugPlay, ui.debugPlaySeconds)
 								})
@@ -384,7 +428,7 @@ func (ui *UI) eventLoop() error {
 					ui.watchVolume = st.Volume
 					if ui.debug && !ui.hwdecLogged && st.HWDecCurrent != "" && st.HWDecCurrent != "no" {
 						ui.hwdecLogged = true
-						fmt.Fprintf(os.Stderr, "hwdec-current=%s\n", st.HWDecCurrent)
+						fmt.Fprintf(os.Stderr, "hwdec-current=%s video-codec=%s\n", st.HWDecCurrent, st.VideoCodec)
 						if ui.debugPlaySeconds > 0 {
 							go func() {
 								time.Sleep(time.Duration(ui.debugPlaySeconds) * time.Second)
@@ -416,6 +460,13 @@ func (ui *UI) eventLoop() error {
 }
 
 func (ui *UI) onStoreLoaded() {
+	ui.settings = ui.store.Settings()
+	if !ui.cliExternalPlayer {
+		ui.externalPlayer = (ui.settings.Player == store.PlayerExternal)
+	}
+	if ui.account != nil {
+		ui.account.SetBrowser(ui.settings.BrowserSpec)
+	}
 	ui.state.Subscriptions = ui.store.Subscriptions()
 	if ui.state.CurrentTab == TabHome {
 		if ui.account != nil && ui.account.SignedIn() {
@@ -824,6 +875,8 @@ func (ui *UI) playVideoExternal(v yt.Video, audio bool) {
 		URL:       v.WatchURL(),
 		Title:     v.Title,
 		Audio:     audio,
+		Policy:    player.CodecPolicy(ui.settings.CodecPolicy),
+		Caps:      ui.cachedCaps,
 		ExtraArgs: extraArgs,
 	}
 
@@ -2212,16 +2265,143 @@ func (ui *UI) layoutSubscriptionsView(gtx layout.Context) layout.Dimensions {
 	})
 }
 
-// layoutAccountView renders the Account page from phase 6:
-// - Status line: Signed in / Signed out / error reason
-// - 'Sign in with Chrome' button (red, like Subscribe) or 'Sign out' (surface)
-// - Browser specification text field (default chrome+gnomekeyring)
-// - Spinner-free 'Signing in…' text while in flight
+func (ui *UI) saveSettings() {
+	if ui.store != nil {
+		_ = ui.store.SaveSettings(ui.settings)
+	}
+}
+
+func (ui *UI) layoutSettingChip(gtx layout.Context, click *widget.Clickable, title string, isSelected bool) layout.Dimensions {
+	if click.Hovered() {
+		pointer.CursorPointer.Add(gtx.Ops)
+	}
+
+	chipBg := ui.colors.Surface
+	chipFg := ui.colors.Text
+	if isSelected {
+		chipBg = ui.colors.ChipActiveBg
+		chipFg = ui.colors.ChipActiveText
+	} else if click.Hovered() {
+		chipBg = ui.colors.SurfaceHover
+	}
+
+	return click.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		return layout.Background{}.Layout(gtx,
+			func(gtx layout.Context) layout.Dimensions {
+				r := clip.UniformRRect(image.Rectangle{Max: gtx.Constraints.Min}, gtx.Dp(8))
+				paint.FillShape(gtx.Ops, chipBg, r.Op(gtx.Ops))
+				return layout.Dimensions{Size: gtx.Constraints.Min}
+			},
+			func(gtx layout.Context) layout.Dimensions {
+				return layout.Inset{
+					Top:    unit.Dp(6),
+					Bottom: unit.Dp(6),
+					Left:   unit.Dp(12),
+					Right:  unit.Dp(12),
+				}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+					lbl := material.Label(ui.th, unit.Sp(13), title)
+					lbl.Color = chipFg
+					if isSelected {
+						lbl.Font.Weight = font.Medium
+					}
+					return lbl.Layout(gtx)
+				})
+			},
+		)
+	})
+}
+
+func formatGPUDecodes(caps embed.Caps, loaded bool, err error) string {
+	if !loaded {
+		return "GPU decodes: querying…"
+	}
+	if err != nil {
+		return fmt.Sprintf("GPU decodes: unavailable (%v)", err)
+	}
+
+	var parts []string
+	if caps.H264 {
+		parts = append(parts, "H.264")
+	}
+	if caps.HEVC {
+		parts = append(parts, "HEVC")
+	}
+	if caps.VP9 {
+		parts = append(parts, "VP9")
+	}
+	if caps.AV1 {
+		parts = append(parts, "AV1")
+	}
+
+	if len(parts) == 0 {
+		if caps.Driver != "" {
+			return fmt.Sprintf("GPU decodes: none (%s)", caps.Driver)
+		}
+		return "GPU decodes: none"
+	}
+
+	codecs := strings.Join(parts, ", ")
+	if caps.Driver != "" {
+		return fmt.Sprintf("GPU decodes: %s (%s)", codecs, caps.Driver)
+	}
+	return fmt.Sprintf("GPU decodes: %s", codecs)
+}
+
+// layoutAccountView renders the You/Account page:
+// - Account section: Status and Sign in / Sign out button
+// - Settings section: Codec policy chips + GPU decodes text, Player mode chips, Login browser editor
 func (ui *UI) layoutAccountView(gtx layout.Context) layout.Dimensions {
+	// Handle Codec chips
+	if ui.codecAutoChip.Clicked(gtx) {
+		if ui.settings.CodecPolicy != string(player.CodecPolicyAuto) {
+			ui.settings.CodecPolicy = string(player.CodecPolicyAuto)
+			ui.saveSettings()
+		}
+	}
+	if ui.codecOldGPUChip.Clicked(gtx) {
+		if ui.settings.CodecPolicy != string(player.CodecPolicyOldGPU) {
+			ui.settings.CodecPolicy = string(player.CodecPolicyOldGPU)
+			ui.saveSettings()
+		}
+	}
+	if ui.codecAnyChip.Clicked(gtx) {
+		if ui.settings.CodecPolicy != string(player.CodecPolicyAny) {
+			ui.settings.CodecPolicy = string(player.CodecPolicyAny)
+			ui.saveSettings()
+		}
+	}
+
+	// Handle Player chips
+	if ui.playerInplaceChip.Clicked(gtx) {
+		if ui.settings.Player != store.PlayerInplace {
+			ui.settings.Player = store.PlayerInplace
+			if !ui.cliExternalPlayer {
+				ui.externalPlayer = false
+			}
+			ui.saveSettings()
+		}
+	}
+	if ui.playerExternalChip.Clicked(gtx) {
+		if ui.settings.Player != store.PlayerExternal {
+			ui.settings.Player = store.PlayerExternal
+			ui.externalPlayer = true
+			ui.saveSettings()
+		}
+	}
+
+	// Handle Browser Editor
 	for {
 		ev, ok := ui.accountBrowserEditor.Update(gtx)
 		if !ok {
 			break
+		}
+		spec := strings.TrimSpace(ui.accountBrowserEditor.Text())
+		if spec != "" && spec != ui.settings.BrowserSpec {
+			ui.settings.BrowserSpec = spec
+			if ui.account != nil {
+				ui.account.SetBrowser(spec)
+			}
+			ui.saveSettings()
 		}
 		if _, ok := ev.(widget.SubmitEvent); ok {
 			if ui.account != nil && !ui.account.SignedIn() && !ui.accountSigningIn {
@@ -2229,6 +2409,7 @@ func (ui *UI) layoutAccountView(gtx layout.Context) layout.Dimensions {
 			}
 		}
 	}
+
 	if ui.accountSignInBtn.Clicked(gtx) {
 		ui.signInAccount()
 	}
@@ -2284,46 +2465,10 @@ func (ui *UI) layoutAccountView(gtx layout.Context) layout.Dimensions {
 					}),
 				)
 			}),
-			layout.Rigid(layout.Spacer{Height: unit.Dp(24)}.Layout),
-
-			// Browser spec text field
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				lbl := material.Label(ui.th, unit.Sp(13), "Browser specification")
-				lbl.Color = ui.colors.Text2
-				return lbl.Layout(gtx)
-			}),
-			layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				w := gtx.Dp(400)
-				gtx.Constraints.Min.X = w
-				gtx.Constraints.Max.X = w
-				return layout.Background{}.Layout(gtx,
-					func(gtx layout.Context) layout.Dimensions {
-						r := clip.UniformRRect(image.Rectangle{Max: gtx.Constraints.Min}, gtx.Dp(8))
-						paint.FillShape(gtx.Ops, ui.colors.Surface, r.Op(gtx.Ops))
-						return layout.Dimensions{Size: gtx.Constraints.Min}
-					},
-					func(gtx layout.Context) layout.Dimensions {
-						return layout.Inset{
-							Top:    unit.Dp(8),
-							Bottom: unit.Dp(8),
-							Left:   unit.Dp(14),
-							Right:  unit.Dp(14),
-						}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-							ed := material.Editor(ui.th, &ui.accountBrowserEditor, yt.DefaultBrowserSpec())
-							ed.Color = ui.colors.Text
-							ed.HintColor = ui.colors.Text2
-							ed.TextSize = unit.Sp(13)
-							return ed.Layout(gtx)
-						})
-					},
-				)
-			}),
-			layout.Rigid(layout.Spacer{Height: unit.Dp(24)}.Layout),
+			layout.Rigid(layout.Spacer{Height: unit.Dp(16)}.Layout),
 
 			// Button: 'Sign in with Chrome' (red) or 'Sign out' (surface) or 'Signing in…' text
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				// Size the button to its label, as YouTube does.
 				gtx.Constraints.Min.X = 0
 				if ui.accountSigningIn {
 					lbl := material.Label(ui.th, unit.Sp(14), "Signing in…")
@@ -2354,11 +2499,110 @@ func (ui *UI) layoutAccountView(gtx layout.Context) layout.Dimensions {
 				btn.Inset = layout.Inset{Top: unit.Dp(8), Bottom: unit.Dp(8), Left: unit.Dp(20), Right: unit.Dp(20)}
 				return btn.Layout(gtx)
 			}),
+			layout.Rigid(layout.Spacer{Height: unit.Dp(32)}.Layout),
+
+			// Section: "Settings"
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				lbl := material.Label(ui.th, unit.Sp(20), "Settings")
+				lbl.Font.Weight = font.Bold
+				lbl.Color = ui.colors.Text
+				return lbl.Layout(gtx)
+			}),
+			layout.Rigid(layout.Spacer{Height: unit.Dp(16)}.Layout),
+
+			// Row 1: Codec
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				lbl := material.Label(ui.th, unit.Sp(14), "Codec")
+				lbl.Font.Weight = font.Medium
+				lbl.Color = ui.colors.Text
+				return lbl.Layout(gtx)
+			}),
+			layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return ui.layoutSettingChip(gtx, &ui.codecAutoChip, "Auto", ui.settings.CodecPolicy == string(player.CodecPolicyAuto))
+					}),
+					layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return ui.layoutSettingChip(gtx, &ui.codecOldGPUChip, "Old GPU (H.264)", ui.settings.CodecPolicy == string(player.CodecPolicyOldGPU))
+					}),
+					layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return ui.layoutSettingChip(gtx, &ui.codecAnyChip, "Any", ui.settings.CodecPolicy == string(player.CodecPolicyAny))
+					}),
+				)
+			}),
+			layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				gpuText := formatGPUDecodes(ui.cachedCaps, ui.capsLoaded, ui.capsErr)
+				lbl := material.Label(ui.th, unit.Sp(13), gpuText)
+				lbl.Color = ui.colors.Text2
+				return lbl.Layout(gtx)
+			}),
+			layout.Rigid(layout.Spacer{Height: unit.Dp(20)}.Layout),
+
+			// Row 2: Player
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				lbl := material.Label(ui.th, unit.Sp(14), "Player")
+				lbl.Font.Weight = font.Medium
+				lbl.Color = ui.colors.Text
+				return lbl.Layout(gtx)
+			}),
+			layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return ui.layoutSettingChip(gtx, &ui.playerInplaceChip, "In window", ui.settings.Player == store.PlayerInplace)
+					}),
+					layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return ui.layoutSettingChip(gtx, &ui.playerExternalChip, "External mpv", ui.settings.Player == store.PlayerExternal)
+					}),
+				)
+			}),
+			layout.Rigid(layout.Spacer{Height: unit.Dp(20)}.Layout),
+
+			// Row 3: Login browser
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				lbl := material.Label(ui.th, unit.Sp(14), "Login browser")
+				lbl.Font.Weight = font.Medium
+				lbl.Color = ui.colors.Text
+				return lbl.Layout(gtx)
+			}),
+			layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				w := gtx.Dp(400)
+				gtx.Constraints.Min.X = w
+				gtx.Constraints.Max.X = w
+				return layout.Background{}.Layout(gtx,
+					func(gtx layout.Context) layout.Dimensions {
+						r := clip.UniformRRect(image.Rectangle{Max: gtx.Constraints.Min}, gtx.Dp(8))
+						paint.FillShape(gtx.Ops, ui.colors.Surface, r.Op(gtx.Ops))
+						return layout.Dimensions{Size: gtx.Constraints.Min}
+					},
+					func(gtx layout.Context) layout.Dimensions {
+						return layout.Inset{
+							Top:    unit.Dp(8),
+							Bottom: unit.Dp(8),
+							Left:   unit.Dp(14),
+							Right:  unit.Dp(14),
+						}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							ed := material.Editor(ui.th, &ui.accountBrowserEditor, yt.DefaultBrowserSpec())
+							ed.Color = ui.colors.Text
+							ed.HintColor = ui.colors.Text2
+							ed.TextSize = unit.Sp(13)
+							return ed.Layout(gtx)
+						})
+					},
+				)
+			}),
 		)
 	})
 }
 
 func (ui *UI) layoutEmptyState(gtx layout.Context) layout.Dimensions {
+
 	msg := "No items to display"
 	switch ui.state.CurrentTab {
 	case TabHome:
@@ -2486,17 +2730,21 @@ func (ui *UI) openWatchPage(v yt.Video) {
 		scale = 2
 	}
 
-	policy := player.Format(ui.power, player.ModeVideo)
+	codecPol := player.CodecPolicy(ui.settings.CodecPolicy)
+	formatStr := player.FormatFor(ui.power, player.ModeVideo, codecPol, ui.cachedCaps)
+	hwdec := player.HWDec(codecPol, ui.cachedCaps)
 	err := ui.embedPlayer.Play(embed.PlayOptions{
 		URL:         v.WatchURL(),
 		Title:       v.Title,
-		YTDLFormat:  policy,
+		YTDLFormat:  formatStr,
 		CookiesFile: cookiePath,
+		HWDec:       hwdec,
 		WidthPx:     1280,
 		HeightPx:    720,
 		Scale:       scale,
 		Debug:       ui.debug,
 	})
+
 	if err != nil {
 		ui.state.Status = "Playback error: " + err.Error()
 		return

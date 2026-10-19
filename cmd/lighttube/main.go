@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"lighttube/internal/embed"
 	"lighttube/internal/player"
 	"lighttube/internal/store"
 	"lighttube/internal/thumbs"
@@ -33,6 +34,7 @@ Usage:
   lighttube account <signin|signout|status>
   lighttube sub add <url|@handle|UC id>
   lighttube sub list
+  lighttube doctor
   lighttube --version
 `)
 }
@@ -60,6 +62,7 @@ func run(args []string) error {
 	var externalPlayer bool
 	var debugPlay string
 	var debugPlaySeconds int
+	var debugTab string
 	var filtered []string
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -83,6 +86,11 @@ func run(args []string) error {
 		}
 		if arg == "--debug-play-seconds" && i+1 < len(args) {
 			debugPlaySeconds, _ = strconv.Atoi(args[i+1])
+			i++
+			continue
+		}
+		if arg == "--debug-tab" && i+1 < len(args) {
+			debugTab = args[i+1]
 			i++
 			continue
 		}
@@ -116,6 +124,7 @@ func run(args []string) error {
 					ExternalPlayer:   externalPlayer,
 					DebugPlay:        debugPlay,
 					DebugPlaySeconds: debugPlaySeconds,
+					DebugTab:         debugTab,
 				})
 			},
 		}
@@ -127,10 +136,13 @@ func run(args []string) error {
 		return fmt.Errorf("initializing store: %w", err)
 	}
 
+	acc := yt.NewAccount()
+	acc.SetBrowser(st.Settings().BrowserSpec)
+
 	env := &appEnv{
 		ytClient: yt.NewClient(),
 		store:    st,
-		account:  yt.NewAccount(),
+		account:  acc,
 		stdout:   os.Stdout,
 		stderr:   os.Stderr,
 		stdin:    os.Stdin,
@@ -175,6 +187,8 @@ func runWithEnv(env *appEnv, args []string) error {
 		return runAccount(env, filtered[1:])
 	case "sub":
 		return runSub(env, filtered[1:])
+	case "doctor":
+		return runDoctor(env)
 	default:
 		printUsage(env.stderr)
 		return fmt.Errorf("unknown command %q", filtered[0])
@@ -207,9 +221,16 @@ func runPlay(env *appEnv, args []string, debug bool) error {
 	if env.account != nil && env.account.SignedIn() {
 		extraArgs = env.account.YtDlpArgs()
 	}
+	var pol player.CodecPolicy
+	if env.store != nil {
+		pol = player.CodecPolicy(env.store.Settings().CodecPolicy)
+	}
+	caps, _ := embed.DecodeCaps()
 	opts := player.Options{
 		URL:       url,
 		Audio:     *audio,
+		Policy:    pol,
+		Caps:      caps,
 		ExtraArgs: extraArgs,
 		Stdin:     env.stdin,
 		Stdout:    env.stdout,
@@ -222,7 +243,7 @@ func runPlay(env *appEnv, args []string, debug bool) error {
 		if *audio {
 			mode = player.ModeAudio
 		}
-		fmt.Fprintf(env.stderr, "debug: detected power=%v, mode=%v\n", power, mode)
+		fmt.Fprintf(env.stderr, "debug: power=%s mode=%s format=%q policy=%s\n", power, mode, player.FormatFor(power, mode, pol, caps), pol)
 		fmt.Fprintf(env.stderr, "debug: mpv args=%q\n", p.BuildArgs(opts))
 	}
 

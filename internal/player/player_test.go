@@ -1,6 +1,7 @@
 package player
 
 import (
+	"lighttube/internal/embed"
 	"os"
 	"path/filepath"
 	"strings"
@@ -89,6 +90,37 @@ func TestPlayerBuildArgs(t *testing.T) {
 				if args[len(args)-1] != "https://youtube.com/watch?v=123" {
 					t.Errorf("last argument should be URL, got %q", args[len(args)-1])
 				}
+			},
+		},
+		{
+			name: "policy auto with VP9 decode uses auto-safe hwdec",
+			opts: Options{
+				URL:    "https://youtube.com/watch?v=123",
+				Policy: CodecPolicyAuto,
+				Caps:   embed.Caps{H264: true, VP9: true},
+			},
+			check: func(t *testing.T, args []string) {
+				assertContains(t, args, "--hwdec=auto-safe")
+			},
+		},
+		{
+			name: "policy any uses auto-safe hwdec",
+			opts: Options{
+				URL:    "https://youtube.com/watch?v=123",
+				Policy: CodecPolicyAny,
+			},
+			check: func(t *testing.T, args []string) {
+				assertContains(t, args, "--hwdec=auto-safe")
+			},
+		},
+		{
+			name: "policy old-gpu on linux uses vaapi hwdec",
+			opts: Options{
+				URL:    "https://youtube.com/watch?v=123",
+				Policy: CodecPolicyOldGPU,
+			},
+			check: func(t *testing.T, args []string) {
+				assertContains(t, args, "--hwdec=vaapi")
 			},
 		},
 	}

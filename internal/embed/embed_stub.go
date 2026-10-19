@@ -51,3 +51,13 @@ func (p *Player) Status() Status {
 
 // Close is a no-op on unsupported platforms.
 func (p *Player) Close() {}
+
+// DecodeCaps returns ErrUnsupported on unsupported platforms.
+func DecodeCaps() (Caps, error) {
+	return Caps{}, ErrUnsupported
+}
+
+// CheckLibmpv returns ErrUnsupported on unsupported platforms.
+func CheckLibmpv() error {
+	return ErrUnsupported
+}

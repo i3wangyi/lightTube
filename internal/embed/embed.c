@@ -348,7 +348,9 @@ void embed_context_destroy(embed_context *ctx) {
 
 int embed_player_start(embed_context *ctx, const char *url, const char *title,
                        const char *ytdl_format, const char *cookies_file,
+                       const char *hwdec,
                        int width_px, int height_px, int scale, int debug) {
+
     if (!ctx || !url) return -1;
 
     // 1. Stop any existing playback session
@@ -460,7 +462,9 @@ int embed_player_start(embed_context *ctx, const char *url, const char *title,
         return -8;
     }
 
-    fn_mpv_set_option_string(ctx->mpv, "hwdec", "vaapi");
+    const char *hwdec_opt = (hwdec && hwdec[0]) ? hwdec : "auto-safe";
+    fn_mpv_set_option_string(ctx->mpv, "hwdec", hwdec_opt);
+
     fn_mpv_set_option_string(ctx->mpv, "vo", "libmpv");
     fn_mpv_set_option_string(ctx->mpv, "osc", "no");
     fn_mpv_set_option_string(ctx->mpv, "input-default-bindings", "no");
@@ -678,7 +682,16 @@ void embed_player_get_status(embed_context *ctx, embed_status *status) {
             strncpy(status->hwdec_current, hwdec, sizeof(status->hwdec_current) - 1);
             fn_mpv_free(hwdec);
         }
+        char *vcodec = fn_mpv_get_property_string(ctx->mpv, "video-codec");
+        if (!vcodec) {
+            vcodec = fn_mpv_get_property_string(ctx->mpv, "video-format");
+        }
+        if (vcodec) {
+            strncpy(status->video_codec, vcodec, sizeof(status->video_codec) - 1);
+            fn_mpv_free(vcodec);
+        }
     }
+
 
     int eof = 0;
     if (fn_mpv_get_property(ctx->mpv, "eof-reached", MPV_FORMAT_FLAG, &eof) >= 0) {

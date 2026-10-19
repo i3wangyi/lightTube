@@ -69,6 +69,12 @@ func (p *Player) Play(opts PlayOptions) error {
 		defer C.free(unsafe.Pointer(cCookies))
 	}
 
+	var cHWDec *C.char
+	if opts.HWDec != "" {
+		cHWDec = C.CString(opts.HWDec)
+		defer C.free(unsafe.Pointer(cHWDec))
+	}
+
 	cDebug := C.int(0)
 	if opts.Debug {
 		cDebug = C.int(1)
@@ -85,6 +91,7 @@ func (p *Player) Play(opts PlayOptions) error {
 		cTitle,
 		cFormat,
 		cCookies,
+		cHWDec,
 		C.int(opts.WidthPx),
 		C.int(opts.HeightPx),
 		C.int(scale),
@@ -214,9 +221,11 @@ func (p *Player) Status() Status {
 		Muted:        bool(cStat.muted),
 		Volume:       float64(cStat.volume),
 		HWDecCurrent: C.GoString(&cStat.hwdec_current[0]),
+		VideoCodec:   C.GoString(&cStat.video_codec[0]),
 		IsPlaying:    bool(cStat.is_playing),
 		EOFReached:   bool(cStat.eof_reached),
 	}
+
 }
 
 // Close destroys the embed context and all underlying resources.

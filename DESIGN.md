@@ -130,6 +130,19 @@ rectangles, clock, counter-clockwise arrow). No icon font, no image files.
 - List of channels: avatar circle, name, and a "Subscribed" chip that
   unsubscribes on click (surface bg).
 
+### You / Account page (Settings)
+- Account section: 48 dp avatar circle, name/email, signed in / signed out status,
+  and a Sign in / Sign out button.
+- Settings section (below account):
+  - "Settings" section header (16 sp, bold).
+  - **Codec** row: three chips (`Auto`, `Old GPU (H.264)`, `Any`; active chip uses
+    `chipActive` colors). Beneath the chips: GPU decode summary in `text2` (12 sp),
+    e.g. `GPU decodes: H.264 (iHD)`.
+  - **Player** row: two chips (`In window`, `External mpv`).
+  - **Login browser** row: text field for browser spec (`chrome+gnomekeyring` default)
+    with a Save button.
+  - Setting changes save immediately to `settings.json`.
+
 ### Interaction
 - Single click on a card or row plays (YouTube behavior). `Enter` plays the
   selected item, `A` plays audio only, `W` toggles watch later,

@@ -108,14 +108,30 @@ To load this configuration:
 - `lighttube sub <add|list>`:
   - `lighttube sub add <url|@handle|UC id>`: Resolve channel and add to local subscriptions.
   - `lighttube sub list`: Print local subscriptions (`ChannelID`, `Title`, `URL`).
+- `lighttube doctor`:
+  Run environment diagnostics (mpv, libmpv, yt-dlp, JS runtime, GPU decode capabilities, settings, and login status).
 - `lighttube --version`:
   Print lightTube version.
+
+## Settings and Codec Policy
+
+Preferences are stored in `~/.local/share/lighttube/settings.json`:
+- `codec_policy`:
+  - `auto` (default): Selects best video codec matching detected GPU decode capabilities (AV1 when supported, VP9 when supported, always H.264/AVC1 fallback).
+  - `old-gpu`: Forces H.264 (`avc1`) with VA-API hardware decoding on Linux.
+  - `any`: Best video up to 1080p of any codec.
+  - On battery power, maximum height is capped lower across all policies.
+- `player`: `inplace` (embedded libmpv subsurface) or `external` (separate mpv window). CLI `--external-player` overrides this setting.
+- `browser_spec`: Browser spec string passed to yt-dlp for cookie extraction (default `chrome+gnomekeyring`).
+
+Settings can be changed graphically on the "You" page (Ctrl+5).
 
 ## Account and Data Storage
 
 Authentication uses an existing Google Chrome login session on the machine. There is no OAuth sign-in and no API key.
 - Sign-in extracts session cookies using `yt-dlp --cookies-from-browser chrome+gnomekeyring`.
 - Storage locations:
+  - `~/.local/share/lighttube/settings.json`: Application configuration.
   - `~/.local/share/lighttube/cookies.txt`: Netscape cookie file, written with file mode `0600` (readable only by the owner). Cookie values are never logged or printed.
   - `~/.local/share/lighttube/subscriptions.json`: Local channel subscriptions.
   - `~/.local/share/lighttube/watchlater.json`: Saved watch later items.

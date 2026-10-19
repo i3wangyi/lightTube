@@ -15,8 +15,10 @@ void embed_context_destroy(embed_context *ctx);
 
 int embed_player_start(embed_context *ctx, const char *url, const char *title,
                        const char *ytdl_format, const char *cookies_file,
+                       const char *hwdec,
                        int width_px, int height_px, int scale, int debug);
 void embed_player_stop(embed_context *ctx);
+
 
 void embed_player_set_rect(embed_context *ctx, int x_px, int y_px, int w_px, int h_px, int scale);
 void embed_player_set_hidden(embed_context *ctx, bool hidden);
@@ -34,9 +36,11 @@ typedef struct embed_status {
     bool muted;
     double volume;
     char hwdec_current[32];
+    char video_codec[32];
     bool is_playing;
     bool eof_reached;
 } embed_status;
+
 
 void embed_player_get_status(embed_context *ctx, embed_status *status);
 

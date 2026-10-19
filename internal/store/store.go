@@ -27,6 +27,7 @@ type Store struct {
 	subs       []yt.Subscription
 	watchLater []yt.Video
 	history    []yt.Video
+	settings   Settings
 }
 
 // New creates a Store in the default XDG data directory.
@@ -59,6 +60,7 @@ func NewDeferred(dir string) (*Store, error) {
 		subs:       []yt.Subscription{},
 		watchLater: []yt.Video{},
 		history:    []yt.Video{},
+		settings:   DefaultSettings(),
 	}, nil
 }
 
@@ -95,6 +97,31 @@ func (s *Store) loadAll() error {
 		s.history = s.history[:maxHistory]
 	}
 
+	settingsFile := filepath.Join(s.dir, "settings.json")
+	if err := readJSONFile(settingsFile, &s.settings); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("loading settings: %w", err)
+	}
+	s.settings = s.settings.Normalize()
+
+	return nil
+}
+
+// Settings returns the active persistent settings.
+func (s *Store) Settings() Settings {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.settings
+}
+
+// SaveSettings persists settings to settings.json atomically.
+func (s *Store) SaveSettings(cfg Settings) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cfg = cfg.Normalize()
+	if err := atomicWriteJSON(filepath.Join(s.dir, "settings.json"), cfg); err != nil {
+		return err
+	}
+	s.settings = cfg
 	return nil
 }
 

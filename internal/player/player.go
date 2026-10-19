@@ -6,6 +6,8 @@ import (
 	"io"
 	"os/exec"
 	"sync"
+
+	"lighttube/internal/embed"
 )
 
 // DefaultAppID is the fixed Wayland app id for the mpv window.
@@ -22,6 +24,8 @@ type Options struct {
 	URL       string
 	Title     string
 	Audio     bool
+	Policy    CodecPolicy
+	Caps      embed.Caps
 	ExtraArgs []string
 	Stdin     io.Reader
 	Stdout    io.Writer
@@ -59,10 +63,14 @@ func (p *Player) BuildArgs(opts Options) []string {
 		mode = ModeAudio
 	}
 	power := detectPowerFrom(p.sysfsPath)
-	formatStr := Format(power, mode)
+	policy := opts.Policy
+	if policy == "" {
+		policy = CodecPolicyOldGPU
+	}
+	formatStr := FormatFor(power, mode, policy, opts.Caps)
 
 	args := []string{
-		"--hwdec=vaapi",
+		"--hwdec=" + HWDec(policy, opts.Caps),
 		"--vo=gpu",
 		"--ytdl-format=" + formatStr,
 		"--save-position-on-quit",
