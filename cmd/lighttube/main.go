@@ -73,6 +73,8 @@ func run(args []string) error {
 	var debugPlaySeconds int
 	var debugTab string
 	var debugHeap string
+	var debugSearch string
+	var debugPlaylist bool
 	var debugHover int = -1
 	var debugHoverSeconds int
 	var filtered []string
@@ -89,6 +91,15 @@ func run(args []string) error {
 		if arg == "--search" && i+1 < len(args) {
 			search = args[i+1]
 			i++
+			continue
+		}
+		if arg == "--debug-search" && i+1 < len(args) {
+			debugSearch = args[i+1]
+			i++
+			continue
+		}
+		if arg == "--debug-playlist" {
+			debugPlaylist = true
 			continue
 		}
 		if arg == "--debug-play" && i+1 < len(args) {
@@ -159,6 +170,8 @@ func run(args []string) error {
 					DebugHover:        hoverPtr,
 					DebugHoverSeconds: debugHoverSeconds,
 					DebugHeap:         debugHeap,
+					DebugSearch:       debugSearch,
+					DebugPlaylist:     debugPlaylist,
 				})
 			},
 		}

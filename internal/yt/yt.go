@@ -49,6 +49,16 @@ type Channel struct {
 	URL           string `json:"url,omitempty"`
 }
 
+// Playlist represents a saved YouTube playlist.
+type Playlist struct {
+	ID           string `json:"id"`
+	Title        string `json:"title"`
+	ThumbnailURL string `json:"thumbnail_url,omitempty"`
+	VideoCount   int    `json:"video_count,omitempty"`
+	URL          string `json:"url,omitempty"`
+	Channel      string `json:"channel,omitempty"`
+}
+
 // Storyboard represents preview storyboard metadata for a video.
 type Storyboard struct {
 	VideoID  string   `json:"video_id"`

@@ -87,12 +87,13 @@ type Account struct {
 	mu sync.RWMutex
 	// runMu serializes yt-dlp runs: each run rewrites the whole cookie file
 	// on exit, so parallel runs could interleave and corrupt it.
-	runMu      sync.Mutex
-	channelsMu sync.Mutex
-	Browser    string
-	CookieFile string
-	CacheDir   string
-	BinaryPath string
+	runMu       sync.Mutex
+	channelsMu  sync.Mutex
+	playlistsMu sync.Mutex
+	Browser     string
+	CookieFile  string
+	CacheDir    string
+	BinaryPath  string
 }
 
 // AccountOptions configures an Account instance.
@@ -415,6 +416,119 @@ func (a *Account) CachedChannels() ([]Channel, error) {
 	}
 
 	return channels, nil
+}
+
+// Playlists fetches the account's saved playlists list via yt-dlp, caching results to disk.
+// At most one playlists fetch is in flight at a time.
+func (a *Account) Playlists(ctx context.Context) ([]Playlist, error) {
+	if !a.SignedIn() {
+		return nil, ErrLoginRequired
+	}
+
+	a.playlistsMu.Lock()
+	defer a.playlistsMu.Unlock()
+
+	cookieCopy, err := a.PlaybackCookieFile()
+	if err != nil {
+		return nil, fmt.Errorf("preparing playback cookie file: %w", err)
+	}
+
+	bin := a.BinaryPath
+	if bin == "" {
+		bin = "yt-dlp"
+	}
+
+	args := []string{
+		"--cookies", cookieCopy,
+		"--flat-playlist",
+		"-J",
+		"https://www.youtube.com/feed/playlists",
+	}
+
+	cmd := exec.CommandContext(ctx, bin, args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	runErr := cmd.Run()
+	cleanStderr := SanitizeErrorOutput(stderr.String())
+	if runErr != nil {
+		if isLoginSignal(cleanStderr) {
+			return nil, fmt.Errorf("%w: %s", ErrLoginRequired, cleanStderr)
+		}
+		return nil, fmt.Errorf("yt-dlp playlists error: %w (stderr: %s)", runErr, cleanStderr)
+	}
+
+	playlists, err := ParseAccountPlaylistsJSON(stdout.Bytes())
+	if err != nil {
+		return nil, fmt.Errorf("parsing account playlists: %w", err)
+	}
+
+	cacheFile := filepath.Join(a.CacheDir, "playlists.json")
+	if enc, encErr := json.MarshalIndent(playlists, "", "  "); encErr == nil {
+		_ = atomicWriteFile(cacheFile, enc)
+	}
+
+	return playlists, nil
+}
+
+// CachedPlaylists reads the cached saved playlists list without network execution.
+func (a *Account) CachedPlaylists() ([]Playlist, error) {
+	cacheFile := filepath.Join(a.CacheDir, "playlists.json")
+	data, err := os.ReadFile(cacheFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("reading cached playlists: %w", err)
+	}
+
+	var playlists []Playlist
+	if err := json.Unmarshal(data, &playlists); err != nil {
+		return nil, fmt.Errorf("decoding cached playlists: %w", err)
+	}
+
+	return playlists, nil
+}
+
+// PlaylistVideos fetches entries for a playlist URL via yt-dlp.
+func (a *Account) PlaylistVideos(ctx context.Context, playlistURL string) (string, []Video, error) {
+	if playlistURL == "" {
+		return "", nil, errors.New("empty playlist URL")
+	}
+
+	bin := a.BinaryPath
+	if bin == "" {
+		bin = "yt-dlp"
+	}
+
+	args := []string{
+		"--flat-playlist",
+		"-J",
+		playlistURL,
+	}
+
+	if a.SignedIn() {
+		if cookieCopy, err := a.PlaybackCookieFile(); err == nil {
+			args = append([]string{"--cookies", cookieCopy}, args...)
+		}
+	}
+
+	cmd := exec.CommandContext(ctx, bin, args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	runErr := cmd.Run()
+	cleanStderr := SanitizeErrorOutput(stderr.String())
+	if runErr != nil {
+		if isLoginSignal(cleanStderr) {
+			return "", nil, fmt.Errorf("%w: %s", ErrLoginRequired, cleanStderr)
+		}
+		return "", nil, fmt.Errorf("yt-dlp playlist videos error: %w (stderr: %s)", runErr, cleanStderr)
+	}
+
+	return ParsePlaylistDetailJSON(stdout.Bytes())
 }
 
 // Storyboard fetches video storyboard format (prefers sb0) via yt-dlp, caching to disk for 24 hours.
@@ -744,6 +858,103 @@ func ParseAccountChannelsJSON(data []byte) ([]Channel, error) {
 	}
 
 	return channels, nil
+}
+
+// ParseAccountPlaylistsJSON parses yt-dlp flat-playlist -J output for account playlists.
+func ParseAccountPlaylistsJSON(data []byte) ([]Playlist, error) {
+	if len(bytes.TrimSpace(data)) == 0 || bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return []Playlist{}, nil
+	}
+
+	var payload struct {
+		Entries []map[string]any `json:"entries"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return nil, fmt.Errorf("decoding playlists JSON: %w", err)
+	}
+
+	playlists := make([]Playlist, 0, len(payload.Entries))
+	for _, entry := range payload.Entries {
+		id := cleanString(entry["id"])
+		if id == "" {
+			continue
+		}
+
+		title := cleanString(entry["title"])
+		url := cleanString(entry["url"])
+		if url == "" {
+			url = "https://www.youtube.com/playlist?list=" + id
+		}
+
+		channel := cleanString(entry["channel"])
+		if channel == "" {
+			channel = cleanString(entry["uploader"])
+		}
+		// YouTube puts its "View full playlist" link label in the owner
+		// field of the user's own playlists; it is not a channel name.
+		if strings.EqualFold(channel, "View full playlist") {
+			channel = ""
+		}
+
+		videoCount := cleanInt(entry["playlist_count"])
+		if videoCount == 0 {
+			videoCount = cleanInt(entry["video_count"])
+		}
+
+		var thumbURL string
+		if rawThumbs, ok := entry["thumbnails"].([]any); ok && len(rawThumbs) > 0 {
+			var bestH int
+			for _, item := range rawThumbs {
+				if m, ok := item.(map[string]any); ok {
+					u := cleanString(m["url"])
+					if u == "" {
+						continue
+					}
+					h := cleanInt(m["height"])
+					if thumbURL == "" || h > bestH {
+						thumbURL = u
+						bestH = h
+					}
+				}
+			}
+		}
+		if thumbURL != "" && strings.HasPrefix(thumbURL, "//") {
+			thumbURL = "https:" + thumbURL
+		}
+
+		playlists = append(playlists, Playlist{
+			ID:           id,
+			Title:        title,
+			ThumbnailURL: thumbURL,
+			VideoCount:   videoCount,
+			URL:          url,
+			Channel:      channel,
+		})
+	}
+
+	return playlists, nil
+}
+
+// ParsePlaylistDetailJSON parses yt-dlp flat-playlist -J output for a single playlist's entries.
+func ParsePlaylistDetailJSON(data []byte) (string, []Video, error) {
+	if len(bytes.TrimSpace(data)) == 0 || bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return "", []Video{}, nil
+	}
+
+	var payload struct {
+		Title   string           `json:"title"`
+		Entries []map[string]any `json:"entries"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return "", nil, fmt.Errorf("decoding playlist detail JSON: %w", err)
+	}
+
+	videos, err := ParseAccountFeedJSON(data)
+	if err != nil {
+		return payload.Title, nil, err
+	}
+
+	return payload.Title, videos, nil
 }
 
 // ParseStoryboardJSON parses yt-dlp -J output for storyboard format (prefers sb0, then any sb format).

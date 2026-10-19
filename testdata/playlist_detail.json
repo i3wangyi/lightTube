@@ -1,0 +1,25 @@
+{
+  "id": "PLtestTritonKernels000000000000002",
+  "title": "Triton GPU Kernels 101",
+  "playlist_count": 2,
+  "entries": [
+    {
+      "id": "vidLesson01",
+      "title": "Triton GPU Kernels Lesson #1 | Syllabus Day",
+      "channel": "Kernel Dev",
+      "channel_id": "UCtestKernelDev00000002",
+      "duration": 940,
+      "view_count": 7900,
+      "url": "https://www.youtube.com/watch?v=vidLesson01"
+    },
+    {
+      "id": "vidLesson02",
+      "title": "Triton GPU Kernels Lesson #2 | Vector Add",
+      "channel": "Kernel Dev",
+      "channel_id": "UCtestKernelDev00000002",
+      "duration": 1240,
+      "view_count": 5200,
+      "url": "https://www.youtube.com/watch?v=vidLesson02"
+    }
+  ]
+}

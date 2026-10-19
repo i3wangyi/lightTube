@@ -93,6 +93,8 @@ func TestAccountCachedFeedsWhenSignedIn(t *testing.T) {
 	if len(ui.state.Videos) != 1 || ui.state.Videos[0].ID != "hist1" {
 		t.Errorf("expected cached history video hist1, got %+v", ui.state.Videos)
 	}
+
+	time.Sleep(50 * time.Millisecond)
 }
 
 func TestAccountFeedsWhenSignedOut(t *testing.T) {

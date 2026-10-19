@@ -17,6 +17,7 @@ const (
 	TabAccount
 	TabSearch
 	TabWatch
+	TabPlaylist
 )
 
 func (t Tab) String() string {
@@ -35,6 +36,8 @@ func (t Tab) String() string {
 		return "Search"
 	case TabWatch:
 		return "Watch"
+	case TabPlaylist:
+		return "Playlist"
 	default:
 		return "Home"
 	}
@@ -175,6 +178,8 @@ type State struct {
 	Status              string
 	WatchVideo          yt.Video
 	UpNextVideos        []yt.Video
+	SavedPlaylists      []yt.Playlist
+	CurrentPlaylist     yt.Playlist
 }
 
 // NewState creates an initial UI state with Home as the default view.

@@ -3,6 +3,7 @@ package ui
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"runtime/pprof"
@@ -39,6 +41,7 @@ import (
 	"gioui.org/widget/material"
 
 	"lighttube/internal/embed"
+	"lighttube/internal/platform"
 	"lighttube/internal/player"
 	"lighttube/internal/store"
 	"lighttube/internal/thumbs"
@@ -47,22 +50,27 @@ import (
 
 // Options holds runtime dependencies injected into the UI.
 type Options struct {
-	YTClient          *yt.Client
-	Store             *store.Store
-	Player            *player.Player
-	Account           *yt.Account
-	Thumbs            *thumbs.Manager
-	Window            *app.Window
-	Debug             bool
-	StartTime         time.Time
-	Search            string
-	ExternalPlayer    bool
-	DebugPlay         string
-	DebugPlaySeconds  int
-	DebugTab          string
-	DebugHover        *int
-	DebugHoverSeconds int
-	DebugHeap         string
+	YTClient           *yt.Client
+	Store              *store.Store
+	Player             *player.Player
+	Account            *yt.Account
+	Thumbs             *thumbs.Manager
+	Window             *app.Window
+	Debug              bool
+	StartTime          time.Time
+	Search             string
+	ExternalPlayer     bool
+	DebugPlay          string
+	DebugPlaySeconds   int
+	DebugTab           string
+	DebugHover         *int
+	DebugHoverSeconds  int
+	DebugHeap          string
+	DebugSearch        string
+	DebugPlaylist      bool
+	GoogleSignInRunner yt.CommandRunner
+	SuggestClient      *yt.SuggestionsClient
+	SuggestClock       yt.Clock
 }
 
 // UI manages the Gio window, layout, and event interactions.
@@ -147,9 +155,38 @@ type UI struct {
 	accountError         string
 	accountBrowserEditor widget.Editor
 	accountSignInBtn     widget.Clickable
-	accountSignOutBtn    widget.Clickable
 	refreshMu            sync.Mutex
 	refreshingFeeds      map[yt.FeedKind]bool
+
+	// Phase 9: Typeahead
+	suggestMgr      *yt.SuggestManager
+	suggestItems    []string
+	suggestSelected int
+	suggestVisible  bool
+	suggestClicks   [10]widget.Clickable
+	lastSearchText  string
+
+	// Phase 9: Playlists
+	playlistsLoading bool
+	playlistsLoaded  bool
+	playlistClicks   []widget.Clickable
+	playlistBackBtn  widget.Clickable
+	debugPlaylist    bool
+
+	// Phase 9: Multi-Account
+	accountSwitchClicks  map[string]*widget.Clickable
+	accountSignOutClicks map[string]*widget.Clickable
+	accountRemoveClicks  map[string]*widget.Clickable
+	addAccountBtn        widget.Clickable
+	cancelAddAccountBtn  widget.Clickable
+	accountSignOutBtn    widget.Clickable
+	showAddAccount       bool
+	discoveredProfiles   []yt.BrowserProfile
+	addProfileClicks     []widget.Clickable
+	signInGoogleBtn      widget.Clickable
+	signInGoogleStatus   string
+	googleSignInLauncher *yt.GoogleSignInLauncher
+	accountList          layout.List
 
 	// Mini guide (5 items: Home, Subscriptions, Watch later, History, Account)
 	guideClicks [5]widget.Clickable
@@ -242,11 +279,27 @@ func New(opts Options) *UI {
 	settings := store.DefaultSettings()
 	if opts.Store != nil {
 		settings = opts.Store.Settings()
-		acc.SetBrowser(settings.BrowserSpec)
+		activeAcc := opts.Store.ActiveAccount()
+		if activeAcc.CookieFile != "" {
+			acc.CookieFile = activeAcc.CookieFile
+		}
+		if activeAcc.CacheDir != "" {
+			acc.CacheDir = activeAcc.CacheDir
+		}
+		if activeAcc.BrowserSpec != "" {
+			acc.SetBrowser(activeAcc.BrowserSpec)
+		} else {
+			acc.SetBrowser(settings.BrowserSpec)
+		}
 	} else if opts.Account != nil && opts.Account.Browser != "" {
 		settings.BrowserSpec = opts.Account.Browser
 	} else {
 		acc.SetBrowser(settings.BrowserSpec)
+	}
+
+	initSearch := opts.Search
+	if opts.DebugSearch != "" {
+		initSearch = opts.DebugSearch
 	}
 
 	extPlayer := opts.ExternalPlayer
@@ -255,40 +308,65 @@ func New(opts Options) *UI {
 	}
 
 	ui := &UI{
-		ytClient:           ytClient,
-		store:              st,
-		player:             p,
-		account:            acc,
-		thumbs:             thMgr,
-		window:             opts.Window,
-		th:                 th,
-		colors:             colors,
-		state:              NewState(),
-		power:              player.DetectPower(),
-		mode:               player.ModeVideo,
-		debug:              opts.Debug,
-		startTime:          opts.StartTime,
-		initialSearch:      opts.Search,
-		settings:           settings,
-		cliExternalPlayer:  opts.ExternalPlayer,
-		externalPlayer:     extPlayer,
-		debugPlay:          opts.DebugPlay,
-		debugPlaySeconds:   opts.DebugPlaySeconds,
-		debugHover:         -1,
-		debugHoverSeconds:  opts.DebugHoverSeconds,
-		hoverCardIdx:       -1,
-		debugHeap:          opts.DebugHeap,
-		watchLastMouseMove: time.Now(),
-		watchVolume:        100,
-		currentScale:       2,
-		refreshingFeeds:    make(map[yt.FeedKind]bool),
-		requested:          make(map[string]bool),
-		imageOps:           make(map[string]paint.ImageOp),
-		windowTag:          new(int),
-		pasteTag:           new(int),
+		ytClient:             ytClient,
+		store:                st,
+		player:               p,
+		account:              acc,
+		thumbs:               thMgr,
+		window:               opts.Window,
+		th:                   th,
+		colors:               colors,
+		state:                NewState(),
+		power:                player.DetectPower(),
+		mode:                 player.ModeVideo,
+		debug:                opts.Debug,
+		startTime:            opts.StartTime,
+		initialSearch:        initSearch,
+		settings:             settings,
+		cliExternalPlayer:    opts.ExternalPlayer,
+		externalPlayer:       extPlayer,
+		debugPlay:            opts.DebugPlay,
+		debugPlaySeconds:     opts.DebugPlaySeconds,
+		debugHover:           -1,
+		debugHoverSeconds:    opts.DebugHoverSeconds,
+		hoverCardIdx:         -1,
+		debugHeap:            opts.DebugHeap,
+		debugPlaylist:        opts.DebugPlaylist,
+		watchLastMouseMove:   time.Now(),
+		watchVolume:          100,
+		currentScale:         2,
+		suggestSelected:      -1,
+		accountSwitchClicks:  make(map[string]*widget.Clickable),
+		accountSignOutClicks: make(map[string]*widget.Clickable),
+		accountRemoveClicks:  make(map[string]*widget.Clickable),
+		googleSignInLauncher: yt.NewGoogleSignInLauncher(opts.GoogleSignInRunner),
+		refreshingFeeds:      make(map[yt.FeedKind]bool),
+		requested:            make(map[string]bool),
+		imageOps:             make(map[string]paint.ImageOp),
+		windowTag:            new(int),
+		pasteTag:             new(int),
 	}
 
+	suggestClient := opts.SuggestClient
+	if suggestClient == nil {
+		suggestClient = yt.NewSuggestionsClient(nil)
+	}
+	ui.suggestMgr = yt.NewSuggestManagerWithClock(suggestClient, opts.SuggestClock, 150*time.Millisecond, func(query string, suggestions []string) {
+		ui.sendAction(func() {
+			if yt.IsURLQuery(ui.searchEditor.Text()) {
+				ui.suggestVisible = false
+				ui.suggestItems = nil
+				return
+			}
+			ui.suggestItems = suggestions
+			ui.suggestSelected = -1
+			ui.suggestVisible = len(suggestions) > 0
+		})
+		ui.invalidate()
+	})
+
 	ui.subsChannelsList.Axis = layout.Horizontal
+	ui.accountList.Axis = layout.Vertical
 
 	if ui.thumbs != nil {
 		ui.thumbs.SetOnEvict(func(id string) {
@@ -320,8 +398,15 @@ func New(opts Options) *UI {
 
 	ui.searchEditor.SingleLine = true
 	ui.searchEditor.Submit = true
-	if opts.Search != "" {
-		ui.searchEditor.SetText(opts.Search)
+	if initSearch != "" {
+		ui.searchEditor.SetText(initSearch)
+	}
+	if opts.DebugSearch != "" {
+		ui.search(opts.DebugSearch)
+	}
+	if opts.DebugPlaylist {
+		ui.state.CurrentTab = TabPlaylist
+		ui.loadSavedPlaylists()
 	}
 
 	ui.accountBrowserEditor.SingleLine = true
@@ -584,6 +669,10 @@ func (ui *UI) onStoreLoaded() {
 		} else {
 			ui.state.SetVideos(nil)
 		}
+	} else if ui.state.CurrentTab == TabAccount {
+		ui.loadSavedPlaylists()
+	} else if ui.state.CurrentTab == TabPlaylist || ui.debugPlaylist {
+		ui.loadSavedPlaylists()
 	}
 	runtime.GC()
 	debug.FreeOSMemory()
@@ -699,21 +788,255 @@ func (ui *UI) signOutAccount() {
 	_ = ui.account.SignOut()
 	ui.accountError = ""
 	ui.state.Status = "Signed out"
-	switch ui.state.CurrentTab {
-	case TabHome:
-		ui.loadMergedFeed()
-	case TabSubscriptions:
-		ui.state.SetVideos(nil)
-	case TabWatchLater:
-		ui.state.SetVideos(ui.store.WatchLater())
-	case TabHistory:
-		ui.state.SetVideos(ui.store.History())
+	ui.state.SavedPlaylists = nil
+	ui.state.AccountChannels = nil
+	ui.playlistsLoaded = false
+	ui.reloadAllFeeds()
+}
+
+func (ui *UI) switchAccount(acc store.AccountConfig) {
+	if ui.store == nil {
+		return
 	}
+	switched, err := ui.store.SwitchAccount(acc.ID)
+	if err != nil {
+		ui.state.Status = fmt.Sprintf("Failed to switch account: %v", err)
+		return
+	}
+	ui.settings = ui.store.Settings()
+	if ui.account != nil {
+		ui.account.CookieFile = switched.CookieFile
+		ui.account.CacheDir = switched.CacheDir
+		ui.account.SetBrowser(switched.BrowserSpec)
+		ui.accountBrowserEditor.SetText(switched.BrowserSpec)
+	}
+	ui.state.SavedPlaylists = nil
+	ui.playlistsLoaded = false
+	ui.state.AccountChannels = nil
+	ui.reloadAllFeeds()
+	ui.state.Status = fmt.Sprintf("Switched to account %s", switched.Label)
+	ui.invalidate()
+}
+
+func (ui *UI) removeAccount(id string) {
+	if ui.store == nil {
+		return
+	}
+	wasActive := ui.settings.ActiveAccount == id
+	if err := ui.store.RemoveAccount(id); err != nil {
+		ui.state.Status = fmt.Sprintf("Failed to remove account: %v", err)
+		return
+	}
+	ui.settings = ui.store.Settings()
+	if wasActive {
+		active := ui.store.ActiveAccount()
+		if ui.account != nil {
+			ui.account.CookieFile = active.CookieFile
+			ui.account.CacheDir = active.CacheDir
+			ui.account.SetBrowser(active.BrowserSpec)
+			ui.accountBrowserEditor.SetText(active.BrowserSpec)
+		}
+		ui.state.SavedPlaylists = nil
+		ui.playlistsLoaded = false
+		ui.state.AccountChannels = nil
+		ui.reloadAllFeeds()
+	}
+	ui.invalidate()
+}
+
+func (ui *UI) reloadAllFeeds() {
+	if ui.account != nil && ui.account.SignedIn() {
+		switch ui.state.CurrentTab {
+		case TabHome:
+			cached, _ := ui.account.Cached(yt.FeedHome)
+			ui.state.SetVideos(cached)
+			ui.refreshAccountFeed(yt.FeedHome)
+			if chs, _ := ui.account.CachedChannels(); len(chs) > 0 {
+				ui.state.AccountChannels = chs
+			}
+			ui.refreshAccountChannels()
+		case TabSubscriptions:
+			cached, _ := ui.account.Cached(yt.FeedSubs)
+			ui.state.SetVideos(cached)
+			ui.refreshAccountFeed(yt.FeedSubs)
+			if chs, _ := ui.account.CachedChannels(); len(chs) > 0 {
+				ui.state.AccountChannels = chs
+			}
+			ui.refreshAccountChannels()
+		case TabWatchLater:
+			cached, _ := ui.account.Cached(yt.FeedWatchLater)
+			ui.state.SetVideos(cached)
+			ui.refreshAccountFeed(yt.FeedWatchLater)
+		case TabHistory:
+			cached, _ := ui.account.Cached(yt.FeedHistory)
+			ui.state.SetVideos(cached)
+			ui.refreshAccountFeed(yt.FeedHistory)
+		case TabAccount:
+			ui.loadSavedPlaylists()
+		}
+	} else {
+		switch ui.state.CurrentTab {
+		case TabHome:
+			ui.loadMergedFeed()
+		case TabSubscriptions:
+			ui.state.SetVideos(nil)
+		case TabWatchLater:
+			if ui.store != nil {
+				ui.state.SetVideos(ui.store.WatchLater())
+			}
+		case TabHistory:
+			if ui.store != nil {
+				ui.state.SetVideos(ui.store.History())
+			}
+		case TabAccount:
+			ui.state.SavedPlaylists = nil
+		}
+	}
+}
+
+func (ui *UI) getAccountClicks(id string) (*widget.Clickable, *widget.Clickable, *widget.Clickable) {
+	if ui.accountSwitchClicks == nil {
+		ui.accountSwitchClicks = make(map[string]*widget.Clickable)
+	}
+	if ui.accountSignOutClicks == nil {
+		ui.accountSignOutClicks = make(map[string]*widget.Clickable)
+	}
+	if ui.accountRemoveClicks == nil {
+		ui.accountRemoveClicks = make(map[string]*widget.Clickable)
+	}
+	sw, ok := ui.accountSwitchClicks[id]
+	if !ok {
+		sw = new(widget.Clickable)
+		ui.accountSwitchClicks[id] = sw
+	}
+	so, ok := ui.accountSignOutClicks[id]
+	if !ok {
+		so = new(widget.Clickable)
+		ui.accountSignOutClicks[id] = so
+	}
+	rm, ok := ui.accountRemoveClicks[id]
+	if !ok {
+		rm = new(widget.Clickable)
+		ui.accountRemoveClicks[id] = rm
+	}
+	return sw, so, rm
+}
+
+func (ui *UI) loadSavedPlaylists() {
+	if ui.account == nil {
+		return
+	}
+
+	if cached, err := ui.account.CachedPlaylists(); err == nil && len(cached) > 0 {
+		ui.state.SavedPlaylists = cached
+		if ui.debugPlaylist && len(cached) > 0 && ui.state.CurrentPlaylist.ID == "" {
+			target := cached[0]
+			for _, p := range cached {
+				if strings.HasPrefix(p.ID, "PL") {
+					target = p
+					break
+				}
+			}
+			ui.openPlaylist(target)
+		}
+	}
+
+	if !ui.account.SignedIn() || ui.playlistsLoading || ui.playlistsLoaded {
+		return
+	}
+
+	ui.playlistsLoading = true
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		playlists, err := ui.account.Playlists(ctx)
+		ui.sendAction(func() {
+			ui.playlistsLoading = false
+			ui.playlistsLoaded = true
+			if err != nil {
+				cleanErr := yt.SanitizeErrorOutput(err.Error())
+				ui.accountError = cleanErr
+				return
+			}
+			ui.accountError = ""
+			ui.state.SavedPlaylists = playlists
+			if ui.debugPlaylist && len(playlists) > 0 && ui.state.CurrentPlaylist.ID == "" {
+				target := playlists[0]
+				for _, p := range playlists {
+					if strings.HasPrefix(p.ID, "PL") {
+						target = p
+						break
+					}
+				}
+				ui.openPlaylist(target)
+			}
+		})
+		ui.invalidate()
+	}()
+}
+
+func (ui *UI) openPlaylist(pl yt.Playlist) {
+	ui.dropThumbnails()
+	ui.state.CurrentTab = TabPlaylist
+	ui.state.CurrentPlaylist = pl
+	ui.state.SetVideos(nil)
+	ui.state.Status = "Loading playlist…"
+
+	targetURL := pl.URL
+	if targetURL == "" && pl.ID != "" {
+		targetURL = "https://www.youtube.com/playlist?list=" + pl.ID
+	}
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		var title string
+		var videos []yt.Video
+		var err error
+		if ui.account != nil {
+			title, videos, err = ui.account.PlaylistVideos(ctx, targetURL)
+		} else {
+			err = errors.New("no account configured")
+		}
+
+		ui.sendAction(func() {
+			if err != nil {
+				cleanErr := yt.SanitizeErrorOutput(err.Error())
+				ui.state.Status = cleanErr
+				return
+			}
+			if title != "" {
+				ui.state.CurrentPlaylist.Title = title
+			}
+			ui.state.SetVideos(videos)
+			ui.state.Status = ""
+		})
+		ui.invalidate()
+	}()
+}
+
+func extractThumbnailVideoID(thumbURL string) string {
+	if idx := strings.Index(thumbURL, "/vi/"); idx != -1 {
+		rest := thumbURL[idx+4:]
+		if slash := strings.IndexByte(rest, '/'); slash != -1 {
+			return rest[:slash]
+		}
+		if q := strings.IndexByte(rest, '?'); q != -1 {
+			return rest[:q]
+		}
+		return rest
+	}
+	return ""
 }
 
 func (ui *UI) switchTab(t Tab) {
 	if ui.state.CurrentTab != t {
 		ui.dropThumbnails()
+		if ui.state.CurrentTab == TabAccount {
+			ui.playlistsLoaded = false
+		}
 	}
 	ui.state.SwitchTab(t)
 	ui.state.ActiveChannelFilter = ""
@@ -764,13 +1087,33 @@ func (ui *UI) switchTab(t Tab) {
 			ui.state.SetVideos(ui.store.History())
 		}
 	case TabAccount:
-		// Account page
+		ui.loadSavedPlaylists()
+		if len(ui.discoveredProfiles) == 0 {
+			go func() {
+				profs := yt.DiscoverBrowserProfiles()
+				ui.sendAction(func() {
+					ui.discoveredProfiles = profs
+				})
+				ui.invalidate()
+			}()
+		}
 	case TabSearch:
 		// Search results tab
 	}
 }
 
 func (ui *UI) handleSearchSubmit() {
+	if ui.suggestVisible && ui.suggestSelected >= 0 && ui.suggestSelected < len(ui.suggestItems) {
+		selected := ui.suggestItems[ui.suggestSelected]
+		ui.suggestVisible = false
+		ui.suggestSelected = -1
+		ui.searchEditor.SetText(selected)
+		ui.search(selected)
+		return
+	}
+	ui.suggestVisible = false
+	ui.suggestSelected = -1
+
 	txt := strings.TrimSpace(ui.searchEditor.Text())
 	if txt == "" {
 		return
@@ -1087,6 +1430,7 @@ func (ui *UI) requestThumbnail(vid string) {
 }
 
 func (ui *UI) layout(gtx layout.Context) layout.Dimensions {
+	ui.drainActions()
 	if ui.pendingFocusTag != nil {
 		gtx.Execute(key.FocusCmd{Tag: ui.pendingFocusTag})
 		ui.pendingFocusTag = nil
@@ -1114,6 +1458,7 @@ func (ui *UI) layout(gtx layout.Context) layout.Dimensions {
 	// runs before the editors read theirs. So while an editor has focus, ask
 	// only for Ctrl (Cmd) shortcuts and Esc; else Enter and the arrows never reach it.
 	editorFocused := gtx.Focused(&ui.searchEditor) || gtx.Focused(&ui.addChannelEditor) || gtx.Focused(&ui.csvPathEditor) || gtx.Focused(&ui.accountBrowserEditor)
+	searchEditorFocused := gtx.Focused(&ui.searchEditor)
 	filters := []event.Filter{
 		key.Filter{Name: "1", Required: key.ModShortcut},
 		key.Filter{Name: "2", Required: key.ModShortcut},
@@ -1125,6 +1470,12 @@ func (ui *UI) layout(gtx layout.Context) layout.Dimensions {
 		key.Filter{Name: "V", Required: key.ModShortcut},
 		key.Filter{Name: "v", Required: key.ModShortcut},
 		key.Filter{Name: key.NameEscape},
+	}
+	if searchEditorFocused && ui.suggestVisible && len(ui.suggestItems) > 0 {
+		filters = append(filters,
+			key.Filter{Focus: &ui.searchEditor, Name: key.NameUpArrow},
+			key.Filter{Focus: &ui.searchEditor, Name: key.NameDownArrow},
+		)
 	}
 	if !editorFocused {
 		filters = append(filters,
@@ -1161,6 +1512,34 @@ func (ui *UI) layout(gtx layout.Context) layout.Dimensions {
 		}
 
 		if ke, ok := evt.(key.Event); ok && ke.State == key.Press {
+			if searchEditorFocused && ui.suggestVisible {
+				switch ke.Name {
+				case key.NameDownArrow:
+					ui.suggestSelected++
+					if ui.suggestSelected >= len(ui.suggestItems) {
+						ui.suggestSelected = len(ui.suggestItems) - 1
+					}
+					continue
+				case key.NameUpArrow:
+					ui.suggestSelected--
+					if ui.suggestSelected < -1 {
+						ui.suggestSelected = -1
+					}
+					continue
+				case key.NameEscape:
+					ui.suggestVisible = false
+					ui.suggestSelected = -1
+					continue
+				}
+			}
+
+			if ke.Name == key.NameEscape {
+				if ui.state.CurrentTab == TabPlaylist {
+					ui.switchTab(TabAccount)
+					continue
+				}
+			}
+
 			isEditorFocused := editorFocused
 			if ui.state.CurrentTab == TabWatch {
 				action, tab, delta := ResolveWatchKeyAction(ke.Name, ke.Modifiers, isEditorFocused)
@@ -1224,26 +1603,36 @@ func (ui *UI) layout(gtx layout.Context) layout.Dimensions {
 	// Paint bg itself (opaque), so it does not depend on compositor background.
 	paint.FillShape(gtx.Ops, ui.colors.Bg, clip.Rect{Max: gtx.Constraints.Max}.Op())
 
-	if ui.state.CurrentTab == TabWatch {
-		if ui.watchFullscreen {
-			return ui.layoutWatchPage(gtx)
-		}
-		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-			layout.Rigid(ui.layoutTopBar),
-			layout.Flexed(1, ui.layoutWatchPage),
-			layout.Rigid(ui.layoutStatusBar),
-		)
-	}
+	return layout.Stack{}.Layout(gtx,
+		layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+			if ui.state.CurrentTab == TabWatch {
+				if ui.watchFullscreen {
+					return ui.layoutWatchPage(gtx)
+				}
+				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+					layout.Rigid(ui.layoutTopBar),
+					layout.Flexed(1, ui.layoutWatchPage),
+					layout.Rigid(ui.layoutStatusBar),
+				)
+			}
 
-	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-		layout.Rigid(ui.layoutTopBar),
-		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-			return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
-				layout.Rigid(ui.layoutMiniGuide),
-				layout.Flexed(1, ui.layoutMainArea),
+			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+				layout.Rigid(ui.layoutTopBar),
+				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+					return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
+						layout.Rigid(ui.layoutMiniGuide),
+						layout.Flexed(1, ui.layoutMainArea),
+					)
+				}),
+				layout.Rigid(ui.layoutStatusBar),
 			)
 		}),
-		layout.Rigid(ui.layoutStatusBar),
+		layout.Expanded(func(gtx layout.Context) layout.Dimensions {
+			if !ui.suggestVisible || len(ui.suggestItems) == 0 {
+				return layout.Dimensions{}
+			}
+			return ui.layoutSuggestionsDropdown(gtx)
+		}),
 	)
 }
 
@@ -1262,11 +1651,28 @@ func (ui *UI) layoutTopBar(gtx layout.Context) layout.Dimensions {
 			ui.handleSearchSubmit()
 		}
 	}
+	// Detect search text changes
+	currentSearchText := ui.searchEditor.Text()
+	if currentSearchText != ui.lastSearchText {
+		ui.lastSearchText = currentSearchText
+		trimmed := strings.TrimSpace(currentSearchText)
+		if gtx.Focused(&ui.searchEditor) && !yt.IsURLQuery(trimmed) {
+			ui.suggestMgr.Input(trimmed)
+		} else {
+			ui.suggestVisible = false
+			ui.suggestItems = nil
+			ui.suggestMgr.Cancel()
+		}
+	}
 	if ui.searchBtn.Clicked(gtx) {
 		ui.handleSearchSubmit()
 	}
 	if ui.searchClearClick.Clicked(gtx) {
 		ui.searchEditor.SetText("")
+		ui.lastSearchText = ""
+		ui.suggestVisible = false
+		ui.suggestItems = nil
+		ui.suggestMgr.Cancel()
 	}
 	if ui.logoClick.Clicked(gtx) {
 		if ui.state.CurrentTab == TabWatch {
@@ -1587,6 +1993,8 @@ func (ui *UI) layoutMainArea(gtx layout.Context) layout.Dimensions {
 			layout.Rigid(ui.layoutChipsRow),
 			layout.Flexed(1, ui.layoutCardGrid),
 		)
+	case TabPlaylist:
+		return ui.layoutPlaylistView(gtx)
 	case TabWatchLater, TabHistory:
 		return ui.layoutCardGrid(gtx)
 	default:
@@ -2624,49 +3032,355 @@ func formatGPUDecodes(caps embed.Caps, loaded bool, err error) string {
 	return fmt.Sprintf("GPU decodes: %s", codecs)
 }
 
-// layoutAccountView renders the You/Account page:
-// - Account section: Status and Sign in / Sign out button
-// - Settings section: Codec policy chips + GPU decodes text, Player mode chips, Login browser editor
-func (ui *UI) layoutAccountView(gtx layout.Context) layout.Dimensions {
-	// Handle Codec chips
-	if ui.codecAutoChip.Clicked(gtx) {
-		if ui.settings.CodecPolicy != string(player.CodecPolicyAuto) {
-			ui.settings.CodecPolicy = string(player.CodecPolicyAuto)
-			ui.saveSettings()
-		}
-	}
-	if ui.codecOldGPUChip.Clicked(gtx) {
-		if ui.settings.CodecPolicy != string(player.CodecPolicyOldGPU) {
-			ui.settings.CodecPolicy = string(player.CodecPolicyOldGPU)
-			ui.saveSettings()
-		}
-	}
-	if ui.codecAnyChip.Clicked(gtx) {
-		if ui.settings.CodecPolicy != string(player.CodecPolicyAny) {
-			ui.settings.CodecPolicy = string(player.CodecPolicyAny)
-			ui.saveSettings()
-		}
+func (ui *UI) layoutSuggestionsDropdown(gtx layout.Context) layout.Dimensions {
+	if !ui.suggestVisible || len(ui.suggestItems) == 0 {
+		return layout.Dimensions{}
 	}
 
-	// Handle Player chips
-	if ui.playerInplaceChip.Clicked(gtx) {
-		if ui.settings.Player != store.PlayerInplace {
-			ui.settings.Player = store.PlayerInplace
-			if !ui.cliExternalPlayer {
-				ui.externalPlayer = false
+	n := len(ui.suggestItems)
+	if n > 10 {
+		n = 10
+	}
+
+	winW := gtx.Constraints.Max.X
+	pillW := gtx.Dp(640)
+	if pillW > winW-gtx.Dp(32) {
+		pillW = winW - gtx.Dp(32)
+	}
+	left := (winW - pillW) / 2
+	top := gtx.Dp(52)
+
+	rowH := gtx.Dp(40)
+	totalH := rowH*n + gtx.Dp(16)
+
+	dropRect := image.Rect(left, top, left+pillW, top+totalH)
+	bgRRect := clip.UniformRRect(dropRect, gtx.Dp(12))
+	paint.FillShape(gtx.Ops, ui.colors.Surface, bgRRect.Op(gtx.Ops))
+	paint.FillShape(gtx.Ops, ui.colors.Border, clip.Stroke{
+		Path:  bgRRect.Path(gtx.Ops),
+		Width: float32(gtx.Dp(1)),
+	}.Op())
+
+	query := strings.TrimSpace(ui.searchEditor.Text())
+	qLower := strings.ToLower(query)
+
+	for i := 0; i < n; i++ {
+		item := ui.suggestItems[i]
+		if ui.suggestClicks[i].Clicked(gtx) {
+			ui.suggestVisible = false
+			ui.suggestSelected = -1
+			ui.searchEditor.SetText(item)
+			ui.search(item)
+			return layout.Dimensions{}
+		}
+
+		rowTop := top + gtx.Dp(8) + i*rowH
+		rowRect := image.Rect(left+gtx.Dp(4), rowTop, left+pillW-gtx.Dp(4), rowTop+rowH)
+		rowRRect := clip.UniformRRect(rowRect, gtx.Dp(8))
+
+		isSel := ui.suggestSelected == i
+		isHov := ui.suggestClicks[i].Hovered()
+		if isSel || isHov {
+			paint.FillShape(gtx.Ops, ui.colors.SurfaceHover, rowRRect.Op(gtx.Ops))
+		}
+		if isHov {
+			pointer.CursorPointer.Add(gtx.Ops)
+		}
+
+		cArea := clip.Rect(rowRect).Push(gtx.Ops)
+		ui.suggestClicks[i].Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			return layout.Dimensions{Size: rowRect.Size()}
+		})
+		cArea.Pop()
+
+		iLower := strings.ToLower(item)
+		var prefixStr, restStr string
+		if strings.HasPrefix(iLower, qLower) && len(qLower) > 0 {
+			prefixStr = item[:len(qLower)]
+			restStr = item[len(qLower):]
+		} else {
+			restStr = item
+		}
+
+		rowArea := clip.Rect(rowRect).Push(gtx.Ops)
+		offset := op.Offset(rowRect.Min).Push(gtx.Ops)
+		rowGtx := gtx
+		rowGtx.Constraints = layout.Exact(rowRect.Size())
+		layout.Inset{Left: unit.Dp(12), Right: unit.Dp(12)}.Layout(rowGtx, func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					sz := gtx.Dp(18)
+					drawMagnifier(gtx, image.Rect(0, 0, sz, sz), ui.colors.Text2)
+					return layout.Dimensions{Size: image.Pt(sz, sz)}
+				}),
+				layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					if prefixStr == "" {
+						lbl := material.Label(ui.th, unit.Sp(14), restStr)
+						lbl.Color = ui.colors.Text
+						lbl.Font.Weight = font.Medium
+						return lbl.Layout(gtx)
+					}
+					return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							lbl := material.Label(ui.th, unit.Sp(14), prefixStr)
+							lbl.Color = ui.colors.Text2
+							return lbl.Layout(gtx)
+						}),
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							lbl := material.Label(ui.th, unit.Sp(14), restStr)
+							lbl.Color = ui.colors.Text
+							lbl.Font.Weight = font.Medium
+							return lbl.Layout(gtx)
+						}),
+					)
+				}),
+			)
+		})
+		offset.Pop()
+		rowArea.Pop()
+	}
+
+	return layout.Dimensions{}
+}
+
+func (ui *UI) layoutPlaylistView(gtx layout.Context) layout.Dimensions {
+	if ui.playlistBackBtn.Clicked(gtx) {
+		ui.switchTab(TabAccount)
+	}
+
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return layout.Inset{
+				Left:   unit.Dp(24),
+				Right:  unit.Dp(24),
+				Top:    unit.Dp(16),
+				Bottom: unit.Dp(16),
+			}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						if ui.playlistBackBtn.Hovered() {
+							pointer.CursorPointer.Add(gtx.Ops)
+						}
+						btn := material.Button(ui.th, &ui.playlistBackBtn, "← Back")
+						btn.Background = ui.colors.Surface
+						btn.Color = ui.colors.Text
+						btn.CornerRadius = unit.Dp(16)
+						btn.Inset = layout.Inset{Top: unit.Dp(6), Bottom: unit.Dp(6), Left: unit.Dp(12), Right: unit.Dp(12)}
+						return btn.Layout(gtx)
+					}),
+					layout.Rigid(layout.Spacer{Width: unit.Dp(16)}.Layout),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								lbl := material.Label(ui.th, unit.Sp(18), ui.state.CurrentPlaylist.Title)
+								lbl.Font.Weight = font.Bold
+								lbl.Color = ui.colors.Text
+								return lbl.Layout(gtx)
+							}),
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								info := ""
+								if ui.state.CurrentPlaylist.Channel != "" {
+									info += ui.state.CurrentPlaylist.Channel
+								}
+								if ui.state.CurrentPlaylist.VideoCount > 0 {
+									if info != "" {
+										info += " • "
+									}
+									info += fmt.Sprintf("%d videos", ui.state.CurrentPlaylist.VideoCount)
+								}
+								if info == "" {
+									return layout.Dimensions{}
+								}
+								lbl := material.Label(ui.th, unit.Sp(13), info)
+								lbl.Color = ui.colors.Text2
+								return lbl.Layout(gtx)
+							}),
+						)
+					}),
+				)
+			})
+		}),
+		layout.Flexed(1, ui.layoutCardGrid),
+	)
+}
+
+func (ui *UI) layoutPlaylistsGrid(gtx layout.Context) layout.Dimensions {
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			lbl := material.Label(ui.th, unit.Sp(20), "Saved Playlists")
+			lbl.Font.Weight = font.Bold
+			lbl.Color = ui.colors.Text
+			return lbl.Layout(gtx)
+		}),
+		layout.Rigid(layout.Spacer{Height: unit.Dp(16)}.Layout),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			if len(ui.state.SavedPlaylists) == 0 {
+				msg := "No saved playlists"
+				if ui.playlistsLoading {
+					msg = "Loading playlists…"
+				} else if ui.account == nil || !ui.account.SignedIn() {
+					msg = "Sign in to see saved playlists"
+				}
+				lbl := material.Label(ui.th, unit.Sp(14), msg)
+				lbl.Color = ui.colors.Text2
+				return lbl.Layout(gtx)
 			}
-			ui.saveSettings()
-		}
-	}
-	if ui.playerExternalChip.Clicked(gtx) {
-		if ui.settings.Player != store.PlayerExternal {
-			ui.settings.Player = store.PlayerExternal
-			ui.externalPlayer = true
-			ui.saveSettings()
-		}
+
+			availW := gtx.Constraints.Max.X
+			cardW := gtx.Dp(220)
+			gapX := gtx.Dp(16)
+			cols := (availW + gapX) / (cardW + gapX)
+			if cols < 1 {
+				cols = 1
+			}
+
+			for len(ui.playlistClicks) < len(ui.state.SavedPlaylists) {
+				ui.playlistClicks = append(ui.playlistClicks, widget.Clickable{})
+			}
+
+			numPlaylists := len(ui.state.SavedPlaylists)
+			numRows := (numPlaylists + cols - 1) / cols
+
+			var rowChildren []layout.FlexChild
+			for r := 0; r < numRows; r++ {
+				rowIdx := r
+				rowChildren = append(rowChildren, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
+						ui.layoutPlaylistRow(gtx, rowIdx, cols, cardW, gapX)...,
+					)
+				}))
+				if r < numRows-1 {
+					rowChildren = append(rowChildren, layout.Rigid(layout.Spacer{Height: unit.Dp(16)}.Layout))
+				}
+			}
+
+			return layout.Flex{Axis: layout.Vertical}.Layout(gtx, rowChildren...)
+		}),
+	)
+}
+
+func (ui *UI) layoutPlaylistRow(gtx layout.Context, rowIdx, cols, cardW, gapX int) []layout.FlexChild {
+	var children []layout.FlexChild
+	start := rowIdx * cols
+	end := start + cols
+	if end > len(ui.state.SavedPlaylists) {
+		end = len(ui.state.SavedPlaylists)
 	}
 
-	// Handle Browser Editor
+	for i := start; i < end; i++ {
+		idx := i
+		pl := ui.state.SavedPlaylists[idx]
+		children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			if ui.playlistClicks[idx].Clicked(gtx) {
+				ui.openPlaylist(pl)
+			}
+			return ui.playlistClicks[idx].Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				if ui.playlistClicks[idx].Hovered() {
+					pointer.CursorPointer.Add(gtx.Ops)
+				}
+				gtx.Constraints.Min.X = cardW
+				gtx.Constraints.Max.X = cardW
+				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						h := cardW * 9 / 16
+						boxSize := image.Pt(cardW, h)
+						gtx.Constraints.Min = boxSize
+						gtx.Constraints.Max = boxSize
+
+						vidID := extractThumbnailVideoID(pl.ThumbnailURL)
+						var imgOp paint.ImageOp
+						hasImg := false
+						if vidID != "" {
+							if img, ok := ui.thumbs.Get(vidID); ok && img != nil {
+								op, cached := ui.imageOps[vidID]
+								if !cached {
+									op = paint.NewImageOp(img)
+									ui.imageOps[vidID] = op
+								}
+								imgOp = op
+								hasImg = true
+							} else {
+								ui.requestThumbnail(vidID)
+							}
+						}
+
+						rrect := clip.UniformRRect(image.Rectangle{Max: boxSize}, gtx.Dp(8))
+						return layout.Background{}.Layout(gtx,
+							func(gtx layout.Context) layout.Dimensions {
+								paint.FillShape(gtx.Ops, ui.colors.Surface, rrect.Op(gtx.Ops))
+								return layout.Dimensions{Size: boxSize}
+							},
+							func(gtx layout.Context) layout.Dimensions {
+								if hasImg {
+									defer rrect.Push(gtx.Ops).Pop()
+									widget.Image{
+										Src: imgOp,
+										Fit: widget.Cover,
+									}.Layout(gtx)
+								}
+								if pl.VideoCount > 0 {
+									return layout.SE.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+										return layout.Inset{
+											Right:  unit.Dp(6),
+											Bottom: unit.Dp(6),
+										}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+											countStr := fmt.Sprintf("%d videos", pl.VideoCount)
+											return layout.Background{}.Layout(gtx,
+												func(gtx layout.Context) layout.Dimensions {
+													bg := color.NRGBA{R: 0x00, G: 0x00, B: 0x00, A: 0xd0}
+													br := clip.UniformRRect(image.Rectangle{Max: gtx.Constraints.Min}, gtx.Dp(4))
+													paint.FillShape(gtx.Ops, bg, br.Op(gtx.Ops))
+													return layout.Dimensions{Size: gtx.Constraints.Min}
+												},
+												func(gtx layout.Context) layout.Dimensions {
+													return layout.Inset{
+														Top:    unit.Dp(2),
+														Bottom: unit.Dp(2),
+														Left:   unit.Dp(6),
+														Right:  unit.Dp(6),
+													}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+														lbl := material.Label(ui.th, unit.Sp(11), countStr)
+														lbl.Color = color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff}
+														return lbl.Layout(gtx)
+													})
+												},
+											)
+										})
+									})
+								}
+								return layout.Dimensions{Size: boxSize}
+							},
+						)
+					}),
+					layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						lbl := material.Label(ui.th, unit.Sp(14), pl.Title)
+						lbl.Font.Weight = font.Medium
+						lbl.Color = ui.colors.Text
+						lbl.MaxLines = 2
+						return lbl.Layout(gtx)
+					}),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						if pl.Channel == "" {
+							return layout.Dimensions{}
+						}
+						lbl := material.Label(ui.th, unit.Sp(12), pl.Channel)
+						lbl.Color = ui.colors.Text2
+						return lbl.Layout(gtx)
+					}),
+				)
+			})
+		}))
+
+		if i < end-1 {
+			children = append(children, layout.Rigid(layout.Spacer{Width: unit.Dp(16)}.Layout))
+		}
+	}
+	return children
+}
+
+func (ui *UI) layoutAccountView(gtx layout.Context) layout.Dimensions {
 	for {
 		ev, ok := ui.accountBrowserEditor.Update(gtx)
 		if !ok {
@@ -2693,6 +3407,132 @@ func (ui *UI) layoutAccountView(gtx layout.Context) layout.Dimensions {
 	if ui.accountSignOutBtn.Clicked(gtx) {
 		ui.signOutAccount()
 	}
+	if ui.addAccountBtn.Clicked(gtx) {
+		ui.showAddAccount = !ui.showAddAccount
+		if ui.showAddAccount && len(ui.discoveredProfiles) == 0 {
+			go func() {
+				profs := yt.DiscoverBrowserProfiles()
+				ui.sendAction(func() {
+					ui.discoveredProfiles = profs
+				})
+				ui.invalidate()
+			}()
+		}
+	}
+	if ui.cancelAddAccountBtn.Clicked(gtx) {
+		ui.showAddAccount = false
+		ui.signInGoogleStatus = ""
+	}
+
+	if ui.signInGoogleBtn.Clicked(gtx) {
+		ui.signInGoogleStatus = "Finish signing in in the browser window, then close it"
+		go func() {
+			ctx := context.Background()
+			accID := fmt.Sprintf("acc_%d", time.Now().Unix())
+			bSpec, uDir, err := ui.googleSignInLauncher.Launch(ctx, ui.store.Dir(), accID)
+			if err != nil {
+				ui.sendAction(func() {
+					ui.signInGoogleStatus = "Error: " + yt.SanitizeErrorOutput(err.Error())
+				})
+				ui.invalidate()
+				return
+			}
+
+			ui.sendAction(func() {
+				ui.signInGoogleStatus = "Extracting cookies…"
+			})
+			ui.invalidate()
+
+			cookieFile := filepath.Join(ui.store.Dir(), "accounts", accID, "cookies.txt")
+			cacheDir := filepath.Join(platform.CacheDir(), "accounts", accID)
+			newAcc := yt.NewAccount()
+			newAcc.CookieFile = cookieFile
+			newAcc.CacheDir = cacheDir
+			newAcc.SetBrowser(bSpec)
+
+			signErr := newAcc.SignIn(ctx)
+			ui.sendAction(func() {
+				if signErr != nil {
+					ui.signInGoogleStatus = "Error extracting cookies: " + yt.SanitizeErrorOutput(signErr.Error())
+					return
+				}
+				accConfig := store.AccountConfig{
+					ID:          accID,
+					Label:       "Google Account",
+					BrowserSpec: bSpec,
+					UserDataDir: uDir,
+					CookieFile:  cookieFile,
+					CacheDir:    cacheDir,
+				}
+				_ = ui.store.AddAccount(accConfig)
+				ui.switchAccount(accConfig)
+				ui.signInGoogleStatus = ""
+				ui.showAddAccount = false
+			})
+			ui.invalidate()
+		}()
+	}
+
+	for len(ui.addProfileClicks) < len(ui.discoveredProfiles) {
+		ui.addProfileClicks = append(ui.addProfileClicks, widget.Clickable{})
+	}
+	for i, prof := range ui.discoveredProfiles {
+		if ui.addProfileClicks[i].Clicked(gtx) {
+			accID := fmt.Sprintf("acc_%d", time.Now().Unix())
+			lbl := prof.Name
+			if prof.UserName != "" {
+				lbl += " (" + prof.UserName + ")"
+			}
+			cookieFile := filepath.Join(ui.store.Dir(), "accounts", accID, "cookies.txt")
+			cacheDir := filepath.Join(platform.CacheDir(), "accounts", accID)
+			newAcc := yt.NewAccount()
+			newAcc.CookieFile = cookieFile
+			newAcc.CacheDir = cacheDir
+			newAcc.SetBrowser(prof.BrowserSpec)
+
+			go func(id, label, spec, cFile, cdDir string) {
+				ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+				defer cancel()
+				err := newAcc.SignIn(ctx)
+				ui.sendAction(func() {
+					if err == nil {
+						accConfig := store.AccountConfig{
+							ID:          id,
+							Label:       label,
+							BrowserSpec: spec,
+							CookieFile:  cFile,
+							CacheDir:    cdDir,
+						}
+						_ = ui.store.AddAccount(accConfig)
+						ui.switchAccount(accConfig)
+						ui.showAddAccount = false
+					} else {
+						ui.accountError = yt.SanitizeErrorOutput(err.Error())
+					}
+				})
+				ui.invalidate()
+			}(accID, lbl, prof.BrowserSpec, cookieFile, cacheDir)
+		}
+	}
+
+	for _, acc := range ui.settings.Accounts {
+		sw, so, rm := ui.getAccountClicks(acc.ID)
+		if sw.Clicked(gtx) {
+			ui.switchAccount(acc)
+		}
+		if so.Clicked(gtx) {
+			if acc.ID == ui.settings.ActiveAccount {
+				ui.signOutAccount()
+			} else {
+				_ = os.Remove(acc.CookieFile)
+				_ = os.Remove(acc.CookieFile + ".play")
+				ui.reloadAllFeeds()
+			}
+		}
+		if rm.Clicked(gtx) {
+			ui.removeAccount(acc.ID)
+		}
+	}
 
 	return layout.Inset{
 		Left:   unit.Dp(24),
@@ -2700,182 +3540,442 @@ func (ui *UI) layoutAccountView(gtx layout.Context) layout.Dimensions {
 		Top:    unit.Dp(24),
 		Bottom: unit.Dp(24),
 	}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-			// Title: "Account"
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				lbl := material.Label(ui.th, unit.Sp(20), "Account")
-				lbl.Font.Weight = font.Bold
-				lbl.Color = ui.colors.Text
-				return lbl.Layout(gtx)
-			}),
-			layout.Rigid(layout.Spacer{Height: unit.Dp(16)}.Layout),
+		return ui.accountList.Layout(gtx, 1, func(gtx layout.Context, _ int) layout.Dimensions {
+			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					lbl := material.Label(ui.th, unit.Sp(24), "You")
+					lbl.Font.Weight = font.Bold
+					lbl.Color = ui.colors.Text
+					return lbl.Layout(gtx)
+				}),
+				layout.Rigid(layout.Spacer{Height: unit.Dp(20)}.Layout),
 
-			// Status line: (Signed in / Signed out / error reason)
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				var statusText string
-				statusCol := ui.colors.Text
-				if ui.accountSigningIn {
-					statusText = "Signing in…"
-					statusCol = ui.colors.Text2
-				} else if ui.accountError != "" {
-					statusText = "Error: " + ui.accountError
-					statusCol = ui.colors.Red
-				} else if ui.account != nil && ui.account.SignedIn() {
-					statusText = "Signed in"
-					statusCol = ui.colors.Text
-				} else {
-					statusText = "Signed out"
-					statusCol = ui.colors.Text2
-				}
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							lbl := material.Label(ui.th, unit.Sp(20), "Accounts")
+							lbl.Font.Weight = font.Bold
+							lbl.Color = ui.colors.Text
+							return lbl.Layout(gtx)
+						}),
+						layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+							return layout.Dimensions{Size: gtx.Constraints.Min}
+						}),
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							btnText := "+ Add account"
+							if ui.showAddAccount {
+								btnText = "Close Add Account"
+							}
+							if ui.addAccountBtn.Hovered() {
+								pointer.CursorPointer.Add(gtx.Ops)
+							}
+							btn := material.Button(ui.th, &ui.addAccountBtn, btnText)
+							btn.Background = ui.colors.Surface
+							btn.Color = ui.colors.Text
+							btn.CornerRadius = unit.Dp(16)
+							btn.Inset = layout.Inset{Top: unit.Dp(6), Bottom: unit.Dp(6), Left: unit.Dp(12), Right: unit.Dp(12)}
+							return btn.Layout(gtx)
+						}),
+					)
+				}),
+				layout.Rigid(layout.Spacer{Height: unit.Dp(12)}.Layout),
 
-				return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					if !ui.showAddAccount {
+						return layout.Dimensions{}
+					}
+					return ui.layoutAddAccountPanel(gtx)
+				}),
+
+				layout.Rigid(ui.layoutAccountsList),
+				layout.Rigid(layout.Spacer{Height: unit.Dp(32)}.Layout),
+
+				layout.Rigid(ui.layoutPlaylistsGrid),
+				layout.Rigid(layout.Spacer{Height: unit.Dp(32)}.Layout),
+
+				layout.Rigid(ui.layoutSettingsSection),
+			)
+		})
+	})
+}
+
+func (ui *UI) layoutAccountsList(gtx layout.Context) layout.Dimensions {
+	accounts := ui.settings.Accounts
+	if len(accounts) == 0 {
+		return layout.Dimensions{}
+	}
+
+	var children []layout.FlexChild
+	for _, a := range accounts {
+		acc := a
+		isActive := acc.ID == ui.settings.ActiveAccount
+		sw, so, rm := ui.getAccountClicks(acc.ID)
+
+		children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return layout.Background{}.Layout(gtx,
+				func(gtx layout.Context) layout.Dimensions {
+					rrect := clip.UniformRRect(image.Rectangle{Max: gtx.Constraints.Min}, gtx.Dp(8))
+					bg := ui.colors.Surface
+					if isActive {
+						bg = ui.colors.SurfaceHover
+					}
+					paint.FillShape(gtx.Ops, bg, rrect.Op(gtx.Ops))
+					return layout.Dimensions{Size: gtx.Constraints.Min}
+				},
+				func(gtx layout.Context) layout.Dimensions {
+					return layout.Inset{
+						Top:    unit.Dp(12),
+						Bottom: unit.Dp(12),
+						Left:   unit.Dp(16),
+						Right:  unit.Dp(16),
+					}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								sz := gtx.Dp(36)
+								return layout.Background{}.Layout(gtx,
+									func(gtx layout.Context) layout.Dimensions {
+										r := clip.UniformRRect(image.Rect(0, 0, sz, sz), gtx.Dp(18))
+										col := ui.colors.SurfaceHover
+										if isActive {
+											col = ui.colors.Red
+										}
+										paint.FillShape(gtx.Ops, col, r.Op(gtx.Ops))
+										return layout.Dimensions{Size: image.Pt(sz, sz)}
+									},
+									func(gtx layout.Context) layout.Dimensions {
+										drawPersonIcon(gtx, image.Rect(0, 0, sz, sz), ui.colors.Text)
+										return layout.Dimensions{Size: image.Pt(sz, sz)}
+									},
+								)
+							}),
+							layout.Rigid(layout.Spacer{Width: unit.Dp(16)}.Layout),
+
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+										lbl := material.Label(ui.th, unit.Sp(15), acc.Label)
+										lbl.Font.Weight = font.Medium
+										lbl.Color = ui.colors.Text
+										return lbl.Layout(gtx)
+									}),
+									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+										subText := acc.ID
+										if isActive {
+											if ui.account != nil && ui.account.SignedIn() {
+												subText = "Active • Signed in"
+											} else {
+												subText = "Active • Signed out"
+											}
+										}
+										lbl := material.Label(ui.th, unit.Sp(12), subText)
+										lbl.Color = ui.colors.Text2
+										return lbl.Layout(gtx)
+									}),
+								)
+							}),
+							layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+								return layout.Dimensions{Size: gtx.Constraints.Min}
+							}),
+
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+										if isActive {
+											return layout.Background{}.Layout(gtx,
+												func(gtx layout.Context) layout.Dimensions {
+													r := clip.UniformRRect(image.Rectangle{Max: gtx.Constraints.Min}, gtx.Dp(12))
+													paint.FillShape(gtx.Ops, color.NRGBA{R: 0x1f, G: 0x6e, B: 0x2e, A: 0xff}, r.Op(gtx.Ops))
+													return layout.Dimensions{Size: gtx.Constraints.Min}
+												},
+												func(gtx layout.Context) layout.Dimensions {
+													return layout.Inset{Top: unit.Dp(4), Bottom: unit.Dp(4), Left: unit.Dp(10), Right: unit.Dp(10)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+														lbl := material.Label(ui.th, unit.Sp(12), "Active")
+														lbl.Color = color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff}
+														return lbl.Layout(gtx)
+													})
+												},
+											)
+										}
+										if sw.Hovered() {
+											pointer.CursorPointer.Add(gtx.Ops)
+										}
+										btn := material.Button(ui.th, sw, "Switch")
+										btn.Background = ui.colors.SurfaceHover
+										btn.Color = ui.colors.Text
+										btn.CornerRadius = unit.Dp(14)
+										btn.Inset = layout.Inset{Top: unit.Dp(4), Bottom: unit.Dp(4), Left: unit.Dp(12), Right: unit.Dp(12)}
+										return btn.Layout(gtx)
+									}),
+									layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+
+									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+										if so.Hovered() {
+											pointer.CursorPointer.Add(gtx.Ops)
+										}
+										btn := material.Button(ui.th, so, "Sign out")
+										btn.Background = ui.colors.SurfaceHover
+										btn.Color = ui.colors.Text2
+										btn.CornerRadius = unit.Dp(14)
+										btn.Inset = layout.Inset{Top: unit.Dp(4), Bottom: unit.Dp(4), Left: unit.Dp(10), Right: unit.Dp(10)}
+										return btn.Layout(gtx)
+									}),
+									layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+
+									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+										if rm.Hovered() {
+											pointer.CursorPointer.Add(gtx.Ops)
+										}
+										btn := material.Button(ui.th, rm, "Remove")
+										btn.Background = ui.colors.SurfaceHover
+										btn.Color = ui.colors.Red
+										btn.CornerRadius = unit.Dp(14)
+										btn.Inset = layout.Inset{Top: unit.Dp(4), Bottom: unit.Dp(4), Left: unit.Dp(10), Right: unit.Dp(10)}
+										return btn.Layout(gtx)
+									}),
+								)
+							}),
+						)
+					})
+				},
+			)
+		}))
+		children = append(children, layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout))
+	}
+
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
+}
+
+func (ui *UI) layoutAddAccountPanel(gtx layout.Context) layout.Dimensions {
+	return layout.Background{}.Layout(gtx,
+		func(gtx layout.Context) layout.Dimensions {
+			rrect := clip.UniformRRect(image.Rectangle{Max: gtx.Constraints.Min}, gtx.Dp(10))
+			paint.FillShape(gtx.Ops, ui.colors.Surface, rrect.Op(gtx.Ops))
+			paint.FillShape(gtx.Ops, ui.colors.Border, clip.Stroke{Path: rrect.Path(gtx.Ops), Width: float32(gtx.Dp(1))}.Op())
+			return layout.Dimensions{Size: gtx.Constraints.Min}
+		},
+		func(gtx layout.Context) layout.Dimensions {
+			return layout.Inset{
+				Top:    unit.Dp(16),
+				Bottom: unit.Dp(16),
+				Left:   unit.Dp(16),
+				Right:  unit.Dp(16),
+			}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						prefixLbl := material.Label(ui.th, unit.Sp(14), "Status: ")
-						prefixLbl.Color = ui.colors.Text2
-						return prefixLbl.Layout(gtx)
-					}),
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						lbl := material.Label(ui.th, unit.Sp(14), statusText)
-						lbl.Color = statusCol
+						lbl := material.Label(ui.th, unit.Sp(16), "1. Use a browser profile")
 						lbl.Font.Weight = font.Medium
+						lbl.Color = ui.colors.Text
 						return lbl.Layout(gtx)
 					}),
-				)
-			}),
-			layout.Rigid(layout.Spacer{Height: unit.Dp(16)}.Layout),
-
-			// Button: 'Sign in with Chrome' (red) or 'Sign out' (surface) or 'Signing in…' text
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				gtx.Constraints.Min.X = 0
-				if ui.accountSigningIn {
-					lbl := material.Label(ui.th, unit.Sp(14), "Signing in…")
-					lbl.Color = ui.colors.Text2
-					lbl.Font.Weight = font.Medium
-					return lbl.Layout(gtx)
-				}
-
-				if ui.account != nil && ui.account.SignedIn() {
-					if ui.accountSignOutBtn.Hovered() {
-						pointer.CursorPointer.Add(gtx.Ops)
-					}
-					btn := material.Button(ui.th, &ui.accountSignOutBtn, "Sign out")
-					btn.Background = ui.colors.Surface
-					btn.Color = ui.colors.Text
-					btn.CornerRadius = unit.Dp(18)
-					btn.Inset = layout.Inset{Top: unit.Dp(8), Bottom: unit.Dp(8), Left: unit.Dp(20), Right: unit.Dp(20)}
-					return btn.Layout(gtx)
-				}
-
-				if ui.accountSignInBtn.Hovered() {
-					pointer.CursorPointer.Add(gtx.Ops)
-				}
-				btn := material.Button(ui.th, &ui.accountSignInBtn, "Sign in with Chrome")
-				btn.Background = ui.colors.Red
-				btn.Color = color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff}
-				btn.CornerRadius = unit.Dp(18)
-				btn.Inset = layout.Inset{Top: unit.Dp(8), Bottom: unit.Dp(8), Left: unit.Dp(20), Right: unit.Dp(20)}
-				return btn.Layout(gtx)
-			}),
-			layout.Rigid(layout.Spacer{Height: unit.Dp(32)}.Layout),
-
-			// Section: "Settings"
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				lbl := material.Label(ui.th, unit.Sp(20), "Settings")
-				lbl.Font.Weight = font.Bold
-				lbl.Color = ui.colors.Text
-				return lbl.Layout(gtx)
-			}),
-			layout.Rigid(layout.Spacer{Height: unit.Dp(16)}.Layout),
-
-			// Row 1: Codec
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				lbl := material.Label(ui.th, unit.Sp(14), "Codec")
-				lbl.Font.Weight = font.Medium
-				lbl.Color = ui.colors.Text
-				return lbl.Layout(gtx)
-			}),
-			layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
+					layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return ui.layoutSettingChip(gtx, &ui.codecAutoChip, "Auto", ui.settings.CodecPolicy == string(player.CodecPolicyAuto))
+						if len(ui.discoveredProfiles) == 0 {
+							lbl := material.Label(ui.th, unit.Sp(13), "No browser profiles found (Chrome, Chromium, Brave, Edge, Firefox).")
+							lbl.Color = ui.colors.Text2
+							return lbl.Layout(gtx)
+						}
+						var profChildren []layout.FlexChild
+						for i, p := range ui.discoveredProfiles {
+							idx := i
+							prof := p
+							profChildren = append(profChildren, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								title := fmt.Sprintf("[%s] %s", strings.Title(prof.Browser), prof.Name)
+								if prof.UserName != "" {
+									title += fmt.Sprintf(" (%s)", prof.UserName)
+								}
+								if ui.addProfileClicks[idx].Hovered() {
+									pointer.CursorPointer.Add(gtx.Ops)
+								}
+								btn := material.Button(ui.th, &ui.addProfileClicks[idx], title)
+								btn.Background = ui.colors.SurfaceHover
+								btn.Color = ui.colors.Text
+								btn.CornerRadius = unit.Dp(14)
+								btn.Inset = layout.Inset{Top: unit.Dp(6), Bottom: unit.Dp(6), Left: unit.Dp(12), Right: unit.Dp(12)}
+								return btn.Layout(gtx)
+							}))
+							profChildren = append(profChildren, layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout))
+						}
+						return layout.Flex{Axis: layout.Vertical}.Layout(gtx, profChildren...)
 					}),
-					layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return ui.layoutSettingChip(gtx, &ui.codecOldGPUChip, "Old GPU (H.264)", ui.settings.CodecPolicy == string(player.CodecPolicyOldGPU))
-					}),
-					layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return ui.layoutSettingChip(gtx, &ui.codecAnyChip, "Any", ui.settings.CodecPolicy == string(player.CodecPolicyAny))
-					}),
-				)
-			}),
-			layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				gpuText := formatGPUDecodes(ui.cachedCaps, ui.capsLoaded, ui.capsErr)
-				lbl := material.Label(ui.th, unit.Sp(13), gpuText)
-				lbl.Color = ui.colors.Text2
-				return lbl.Layout(gtx)
-			}),
-			layout.Rigid(layout.Spacer{Height: unit.Dp(20)}.Layout),
+					layout.Rigid(layout.Spacer{Height: unit.Dp(16)}.Layout),
 
-			// Row 2: Player
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				lbl := material.Label(ui.th, unit.Sp(14), "Player")
-				lbl.Font.Weight = font.Medium
-				lbl.Color = ui.colors.Text
-				return lbl.Layout(gtx)
-			}),
-			layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return ui.layoutSettingChip(gtx, &ui.playerInplaceChip, "In window", ui.settings.Player == store.PlayerInplace)
+						lbl := material.Label(ui.th, unit.Sp(16), "2. Sign in with Google")
+						lbl.Font.Weight = font.Medium
+						lbl.Color = ui.colors.Text
+						return lbl.Layout(gtx)
 					}),
-					layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+					layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return ui.layoutSettingChip(gtx, &ui.playerExternalChip, "External mpv", ui.settings.Player == store.PlayerExternal)
+						desc := material.Label(ui.th, unit.Sp(13), "Opens Chrome or Chromium in an isolated profile to sign in. When finished, close the browser.")
+						desc.Color = ui.colors.Text2
+						return desc.Layout(gtx)
+					}),
+					layout.Rigid(layout.Spacer{Height: unit.Dp(10)}.Layout),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								if ui.signInGoogleBtn.Hovered() {
+									pointer.CursorPointer.Add(gtx.Ops)
+								}
+								btn := material.Button(ui.th, &ui.signInGoogleBtn, "Sign in with Google")
+								btn.Background = ui.colors.Red
+								btn.Color = color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff}
+								btn.CornerRadius = unit.Dp(16)
+								btn.Inset = layout.Inset{Top: unit.Dp(8), Bottom: unit.Dp(8), Left: unit.Dp(16), Right: unit.Dp(16)}
+								return btn.Layout(gtx)
+							}),
+							layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								if ui.signInGoogleStatus == "" {
+									return layout.Dimensions{}
+								}
+								lbl := material.Label(ui.th, unit.Sp(13), ui.signInGoogleStatus)
+								lbl.Color = ui.colors.Text2
+								if strings.HasPrefix(ui.signInGoogleStatus, "Error") {
+									lbl.Color = ui.colors.Red
+								}
+								return lbl.Layout(gtx)
+							}),
+						)
 					}),
 				)
-			}),
-			layout.Rigid(layout.Spacer{Height: unit.Dp(20)}.Layout),
+			})
+		},
+	)
+}
 
-			// Row 3: Login browser
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				lbl := material.Label(ui.th, unit.Sp(14), "Login browser")
-				lbl.Font.Weight = font.Medium
-				lbl.Color = ui.colors.Text
-				return lbl.Layout(gtx)
-			}),
-			layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				w := gtx.Dp(400)
-				gtx.Constraints.Min.X = w
-				gtx.Constraints.Max.X = w
-				return layout.Background{}.Layout(gtx,
-					func(gtx layout.Context) layout.Dimensions {
-						r := clip.UniformRRect(image.Rectangle{Max: gtx.Constraints.Min}, gtx.Dp(8))
-						paint.FillShape(gtx.Ops, ui.colors.Surface, r.Op(gtx.Ops))
-						return layout.Dimensions{Size: gtx.Constraints.Min}
-					},
-					func(gtx layout.Context) layout.Dimensions {
-						return layout.Inset{
-							Top:    unit.Dp(8),
-							Bottom: unit.Dp(8),
-							Left:   unit.Dp(14),
-							Right:  unit.Dp(14),
-						}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-							ed := material.Editor(ui.th, &ui.accountBrowserEditor, yt.DefaultBrowserSpec())
-							ed.Color = ui.colors.Text
-							ed.HintColor = ui.colors.Text2
-							ed.TextSize = unit.Sp(13)
-							return ed.Layout(gtx)
-						})
-					},
-				)
-			}),
-		)
-	})
+func (ui *UI) layoutSettingsSection(gtx layout.Context) layout.Dimensions {
+	if ui.codecAutoChip.Clicked(gtx) {
+		if ui.settings.CodecPolicy != string(player.CodecPolicyAuto) {
+			ui.settings.CodecPolicy = string(player.CodecPolicyAuto)
+			ui.saveSettings()
+		}
+	}
+	if ui.codecOldGPUChip.Clicked(gtx) {
+		if ui.settings.CodecPolicy != string(player.CodecPolicyOldGPU) {
+			ui.settings.CodecPolicy = string(player.CodecPolicyOldGPU)
+			ui.saveSettings()
+		}
+	}
+	if ui.codecAnyChip.Clicked(gtx) {
+		if ui.settings.CodecPolicy != string(player.CodecPolicyAny) {
+			ui.settings.CodecPolicy = string(player.CodecPolicyAny)
+			ui.saveSettings()
+		}
+	}
+
+	if ui.playerInplaceChip.Clicked(gtx) {
+		if ui.settings.Player != store.PlayerInplace {
+			ui.settings.Player = store.PlayerInplace
+			if !ui.cliExternalPlayer {
+				ui.externalPlayer = false
+			}
+			ui.saveSettings()
+		}
+	}
+	if ui.playerExternalChip.Clicked(gtx) {
+		if ui.settings.Player != store.PlayerExternal {
+			ui.settings.Player = store.PlayerExternal
+			ui.externalPlayer = true
+			ui.saveSettings()
+		}
+	}
+
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			lbl := material.Label(ui.th, unit.Sp(20), "Settings")
+			lbl.Font.Weight = font.Bold
+			lbl.Color = ui.colors.Text
+			return lbl.Layout(gtx)
+		}),
+		layout.Rigid(layout.Spacer{Height: unit.Dp(16)}.Layout),
+
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			lbl := material.Label(ui.th, unit.Sp(14), "Codec")
+			lbl.Font.Weight = font.Medium
+			lbl.Color = ui.colors.Text
+			return lbl.Layout(gtx)
+		}),
+		layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return ui.layoutSettingChip(gtx, &ui.codecAutoChip, "Auto", ui.settings.CodecPolicy == string(player.CodecPolicyAuto))
+				}),
+				layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return ui.layoutSettingChip(gtx, &ui.codecOldGPUChip, "Old GPU (H.264)", ui.settings.CodecPolicy == string(player.CodecPolicyOldGPU))
+				}),
+				layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return ui.layoutSettingChip(gtx, &ui.codecAnyChip, "Any", ui.settings.CodecPolicy == string(player.CodecPolicyAny))
+				}),
+			)
+		}),
+		layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			gpuText := formatGPUDecodes(ui.cachedCaps, ui.capsLoaded, ui.capsErr)
+			lbl := material.Label(ui.th, unit.Sp(13), gpuText)
+			lbl.Color = ui.colors.Text2
+			return lbl.Layout(gtx)
+		}),
+		layout.Rigid(layout.Spacer{Height: unit.Dp(20)}.Layout),
+
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			lbl := material.Label(ui.th, unit.Sp(14), "Player")
+			lbl.Font.Weight = font.Medium
+			lbl.Color = ui.colors.Text
+			return lbl.Layout(gtx)
+		}),
+		layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return ui.layoutSettingChip(gtx, &ui.playerInplaceChip, "In window", ui.settings.Player == store.PlayerInplace)
+				}),
+				layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return ui.layoutSettingChip(gtx, &ui.playerExternalChip, "External mpv", ui.settings.Player == store.PlayerExternal)
+				}),
+			)
+		}),
+		layout.Rigid(layout.Spacer{Height: unit.Dp(20)}.Layout),
+
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			lbl := material.Label(ui.th, unit.Sp(14), "Login browser")
+			lbl.Font.Weight = font.Medium
+			lbl.Color = ui.colors.Text
+			return lbl.Layout(gtx)
+		}),
+		layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			w := gtx.Dp(400)
+			gtx.Constraints.Min.X = w
+			gtx.Constraints.Max.X = w
+			return layout.Background{}.Layout(gtx,
+				func(gtx layout.Context) layout.Dimensions {
+					r := clip.UniformRRect(image.Rectangle{Max: gtx.Constraints.Min}, gtx.Dp(8))
+					paint.FillShape(gtx.Ops, ui.colors.Surface, r.Op(gtx.Ops))
+					return layout.Dimensions{Size: gtx.Constraints.Min}
+				},
+				func(gtx layout.Context) layout.Dimensions {
+					return layout.Inset{
+						Top:    unit.Dp(8),
+						Bottom: unit.Dp(8),
+						Left:   unit.Dp(14),
+						Right:  unit.Dp(14),
+					}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						ed := material.Editor(ui.th, &ui.accountBrowserEditor, yt.DefaultBrowserSpec())
+						ed.Color = ui.colors.Text
+						ed.HintColor = ui.colors.Text2
+						ed.TextSize = unit.Sp(13)
+						return ed.Layout(gtx)
+					})
+				},
+			)
+		}),
+	)
 }
 
 func (ui *UI) layoutEmptyState(gtx layout.Context) layout.Dimensions {

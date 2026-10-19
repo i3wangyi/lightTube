@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"lighttube/internal/platform"
 	"lighttube/internal/yt"
@@ -60,7 +61,7 @@ func NewDeferred(dir string) (*Store, error) {
 		subs:       []yt.Subscription{},
 		watchLater: []yt.Video{},
 		history:    []yt.Video{},
-		settings:   DefaultSettings(),
+		settings:   DefaultSettingsWithDir(dir),
 	}, nil
 }
 
@@ -69,6 +70,11 @@ func (s *Store) DataDir() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.dir
+}
+
+// Dir returns the data directory used by the store (alias for DataDir).
+func (s *Store) Dir() string {
+	return s.DataDir()
 }
 
 // LoadAll reads subscriptions, watch later, and playback history from disk.
@@ -98,10 +104,11 @@ func (s *Store) loadAll() error {
 	}
 
 	settingsFile := filepath.Join(s.dir, "settings.json")
-	if err := readJSONFile(settingsFile, &s.settings); err != nil && !errors.Is(err, os.ErrNotExist) {
+	var loaded Settings
+	if err := readJSONFile(settingsFile, &loaded); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("loading settings: %w", err)
 	}
-	s.settings = s.settings.Normalize()
+	s.settings = loaded.NormalizeWithDir(s.dir)
 
 	return nil
 }
@@ -113,16 +120,139 @@ func (s *Store) Settings() Settings {
 	return s.settings
 }
 
+// ActiveAccount returns the configuration of the currently active account.
+func (s *Store) ActiveAccount() AccountConfig {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.settings.GetActiveAccount()
+}
+
 // SaveSettings persists settings to settings.json atomically.
 func (s *Store) SaveSettings(cfg Settings) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	cfg = cfg.Normalize()
+	cfg = cfg.NormalizeWithDir(s.dir)
 	if err := atomicWriteJSON(filepath.Join(s.dir, "settings.json"), cfg); err != nil {
 		return err
 	}
 	s.settings = cfg
 	return nil
+}
+
+func (s *Store) saveSettingsLocked() error {
+	cfg := s.settings.NormalizeWithDir(s.dir)
+	if err := atomicWriteJSON(filepath.Join(s.dir, "settings.json"), cfg); err != nil {
+		return err
+	}
+	s.settings = cfg
+	return nil
+}
+
+// AddAccount adds or updates an account in settings.json.
+func (s *Store) AddAccount(acc AccountConfig) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if acc.ID == "" {
+		acc.ID = fmt.Sprintf("acc_%d", time.Now().Unix())
+	}
+	if acc.Label == "" {
+		acc.Label = acc.ID
+	}
+	if acc.CookieFile == "" {
+		if acc.ID == "default" {
+			acc.CookieFile = filepath.Join(s.dir, "cookies.txt")
+		} else {
+			acc.CookieFile = filepath.Join(s.dir, "accounts", acc.ID, "cookies.txt")
+		}
+	}
+	if acc.CacheDir == "" {
+		if acc.ID == "default" {
+			acc.CacheDir = filepath.Join(platform.CacheDir(), "account")
+		} else {
+			acc.CacheDir = filepath.Join(platform.CacheDir(), "accounts", acc.ID)
+		}
+	}
+
+	found := false
+	for i, existing := range s.settings.Accounts {
+		if existing.ID == acc.ID {
+			s.settings.Accounts[i] = acc
+			found = true
+			break
+		}
+	}
+	if !found {
+		s.settings.Accounts = append(s.settings.Accounts, acc)
+	}
+
+	return s.saveSettingsLocked()
+}
+
+// SwitchAccount changes the active account and saves settings.
+func (s *Store) SwitchAccount(id string) (AccountConfig, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, acc := range s.settings.Accounts {
+		if acc.ID == id {
+			s.settings.ActiveAccount = id
+			s.settings.BrowserSpec = acc.BrowserSpec
+			if err := s.saveSettingsLocked(); err != nil {
+				return AccountConfig{}, err
+			}
+			return acc, nil
+		}
+	}
+	return AccountConfig{}, fmt.Errorf("account %q not found", id)
+}
+
+// RemoveAccount deletes an account and cleans up its data directories.
+func (s *Store) RemoveAccount(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var target *AccountConfig
+	newAccounts := make([]AccountConfig, 0, len(s.settings.Accounts))
+	for _, acc := range s.settings.Accounts {
+		if acc.ID == id {
+			copyAcc := acc
+			target = &copyAcc
+		} else {
+			newAccounts = append(newAccounts, acc)
+		}
+	}
+
+	if target == nil {
+		return fmt.Errorf("account %q not found", id)
+	}
+
+	if target.UserDataDir != "" {
+		_ = os.RemoveAll(target.UserDataDir)
+	}
+	if target.ID != "default" {
+		if target.CookieFile != "" {
+			_ = os.Remove(target.CookieFile)
+			_ = os.Remove(target.CookieFile + ".play")
+		}
+		if target.CacheDir != "" {
+			_ = os.RemoveAll(target.CacheDir)
+		}
+	}
+
+	s.settings.Accounts = newAccounts
+	if s.settings.ActiveAccount == id {
+		if len(newAccounts) > 0 {
+			s.settings.ActiveAccount = newAccounts[0].ID
+			s.settings.BrowserSpec = newAccounts[0].BrowserSpec
+		} else {
+			def := DefaultAccountConfig(s.dir, s.settings.BrowserSpec)
+			s.settings.Accounts = []AccountConfig{def}
+			s.settings.ActiveAccount = def.ID
+		}
+	}
+
+	return s.saveSettingsLocked()
 }
 
 // Subscriptions returns a copy of all subscribed channels.

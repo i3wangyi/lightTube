@@ -1,0 +1,53 @@
+{
+  "title": "Playlists",
+  "entries": [
+    {
+      "id": "LL",
+      "title": "Liked videos",
+      "url": "https://www.youtube.com/playlist?list=LL",
+      "channel": "View full playlist",
+      "_type": "url",
+      "ie_key": "YoutubeTab",
+      "thumbnails": [
+        {
+          "url": "https://i.ytimg.com/vi/vidLiked001/hqdefault.jpg",
+          "height": 270,
+          "width": 480
+        }
+      ]
+    },
+    {
+      "id": "PLtestGpuProgramming00000000000001",
+      "title": "GPU Programming",
+      "url": "https://www.youtube.com/playlist?list=PLtestGpuProgramming00000000000001",
+      "channel": "Tech Channel",
+      "channel_id": "UCtestTechChannel000001",
+      "playlist_count": 15,
+      "_type": "url",
+      "ie_key": "YoutubeTab",
+      "thumbnails": [
+        {
+          "url": "https://i.ytimg.com/vi/vidLesson02/hqdefault.jpg",
+          "height": 270,
+          "width": 480
+        }
+      ]
+    },
+    {
+      "id": "PLtestTritonKernels000000000000002",
+      "title": "Triton GPU Kernels 101",
+      "url": "https://www.youtube.com/playlist?list=PLtestTritonKernels000000000000002",
+      "channel": "Kernel Dev",
+      "channel_id": "UCtestKernelDev00000002",
+      "_type": "url",
+      "ie_key": "YoutubeTab",
+      "thumbnails": [
+        {
+          "url": "https://i.ytimg.com/vi/vidLesson01/hqdefault.jpg",
+          "height": 270,
+          "width": 480
+        }
+      ]
+    }
+  ]
+}
