@@ -380,3 +380,141 @@ exit 1
 		t.Fatalf("expected errors.Is(err, ErrLoginRequired) to be true, got %v", err)
 	}
 }
+
+func TestParseAccountChannelsJSON(t *testing.T) {
+	data, err := os.ReadFile("../../testdata/account_channels.json")
+	if err != nil {
+		t.Fatalf("reading account_channels.json fixture: %v", err)
+	}
+
+	channels, err := yt.ParseAccountChannelsJSON(data)
+	if err != nil {
+		t.Fatalf("unexpected error parsing channels: %v", err)
+	}
+
+	if len(channels) != 2 {
+		t.Fatalf("expected 2 channels, got %d", len(channels))
+	}
+
+	c1 := channels[0]
+	if c1.ID != "UCfixturePublicSci000001" {
+		t.Errorf("expected channel ID UCfixturePublicSci000001, got %q", c1.ID)
+	}
+	if c1.Title != "Public Science Lab" {
+		t.Errorf("expected title Public Science Lab, got %q", c1.Title)
+	}
+	if c1.FollowerCount != 12000 {
+		t.Errorf("expected follower count 12000, got %d", c1.FollowerCount)
+	}
+	if !strings.HasPrefix(c1.AvatarURL, "https://") {
+		t.Errorf("expected AvatarURL with https prefix, got %q", c1.AvatarURL)
+	}
+
+	c2 := channels[1]
+	if c2.ID != "UCfixturePaperCraft00002" {
+		t.Errorf("expected channel ID UCfixturePaperCraft00002, got %q", c2.ID)
+	}
+	if c2.Title != "Paper Craft Studio" {
+		t.Errorf("expected title Paper Craft Studio, got %q", c2.Title)
+	}
+}
+
+func TestParseStoryboardJSON(t *testing.T) {
+	data, err := os.ReadFile("../../testdata/storyboard.json")
+	if err != nil {
+		t.Fatalf("reading storyboard.json fixture: %v", err)
+	}
+
+	sb, err := yt.ParseStoryboardJSON(data)
+	if err != nil {
+		t.Fatalf("unexpected error parsing storyboard: %v", err)
+	}
+	if sb == nil {
+		t.Fatal("expected storyboard, got nil")
+	}
+
+	if sb.VideoID != "sbFixture01" {
+		t.Errorf("expected video ID sbFixture01, got %q", sb.VideoID)
+	}
+	if sb.FormatID != "sb0" {
+		t.Errorf("expected format ID sb0, got %q", sb.FormatID)
+	}
+	if sb.Rows != 5 || sb.Columns != 5 {
+		t.Errorf("expected 5x5 grid, got %dx%d", sb.Rows, sb.Columns)
+	}
+	if len(sb.Sheets) != 5 {
+		t.Fatalf("expected 5 sheets, got %d", len(sb.Sheets))
+	}
+	if !strings.Contains(sb.Sheets[0], "M0.jpg") {
+		t.Errorf("expected first sheet to contain M0.jpg, got %q", sb.Sheets[0])
+	}
+}
+
+func TestAccount_Channels_Cached(t *testing.T) {
+	tempDir := t.TempDir()
+	cacheDir := filepath.Join(tempDir, "cache")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	fixture, err := os.ReadFile("../../testdata/account_channels.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	channels, err := yt.ParseAccountChannelsJSON(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	account := yt.NewAccountWithOptions(yt.AccountOptions{
+		CacheDir: cacheDir,
+	})
+
+	// Before caching, CachedChannels should return nil, nil
+	cached, err := account.CachedChannels()
+	if err != nil {
+		t.Fatalf("expected nil err, got %v", err)
+	}
+	if len(cached) != 0 {
+		t.Fatalf("expected 0 cached channels, got %d", len(cached))
+	}
+
+	// Manually write cache to verify CachedChannels
+	cacheFile := filepath.Join(cacheDir, "channels.json")
+	_ = os.WriteFile(cacheFile, []byte(`[{"id":"test1","title":"Test Channel"}]`), 0o644)
+	cached, err = account.CachedChannels()
+	if err != nil {
+		t.Fatalf("reading cached channels: %v", err)
+	}
+	if len(cached) != 1 || cached[0].ID != "test1" {
+		t.Errorf("unexpected cached channels result: %+v", cached)
+	}
+	_ = channels
+}
+
+func TestAccount_Storyboard_Cached(t *testing.T) {
+	tempDir := t.TempDir()
+	cacheDir := filepath.Join(tempDir, "cache")
+	account := yt.NewAccountWithOptions(yt.AccountOptions{
+		CacheDir: cacheDir,
+	})
+
+	sbDir := filepath.Join(cacheDir, "storyboards")
+	if err := os.MkdirAll(sbDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cacheFile := filepath.Join(sbDir, "testvid.json")
+	dummyJSON := `{"video_id":"testvid","format_id":"sb0","rows":5,"columns":5,"sheets":["https://example.com/sheet0.jpg"]}`
+	if err := os.WriteFile(cacheFile, []byte(dummyJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Should read from disk cache within 24h without network
+	sb, err := account.Storyboard(context.Background(), "testvid")
+	if err != nil {
+		t.Fatalf("expected cached storyboard, got err: %v", err)
+	}
+	if sb == nil || sb.VideoID != "testvid" || len(sb.Sheets) != 1 {
+		t.Fatalf("unexpected storyboard: %+v", sb)
+	}
+}

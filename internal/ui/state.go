@@ -169,7 +169,9 @@ type State struct {
 	Videos              []yt.Video
 	SelectedIndex       int
 	Subscriptions       []yt.Subscription
+	AccountChannels     []yt.Channel
 	ActiveChannelFilter string
+	ActiveChannelTitle  string
 	Status              string
 	WatchVideo          yt.Video
 	UpNextVideos        []yt.Video
@@ -187,7 +189,7 @@ func NewState() *State {
 
 // FilteredVideos returns videos filtered by active channel chip if on Home tab.
 func (s *State) FilteredVideos() []yt.Video {
-	if s.CurrentTab == TabHome && s.ActiveChannelFilter != "" {
+	if s.CurrentTab == TabHome && s.ActiveChannelFilter != "" && s.ActiveChannelTitle == "" {
 		filtered := make([]yt.Video, 0, len(s.Videos))
 		for _, v := range s.Videos {
 			if v.ChannelID == s.ActiveChannelFilter {

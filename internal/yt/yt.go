@@ -40,6 +40,26 @@ type Subscription struct {
 	URL       string `json:"url"`
 }
 
+// Channel represents an account-subscribed YouTube channel.
+type Channel struct {
+	ID            string `json:"id"`
+	Title         string `json:"title"`
+	AvatarURL     string `json:"avatar_url,omitempty"`
+	FollowerCount int64  `json:"follower_count,omitempty"`
+	URL           string `json:"url,omitempty"`
+}
+
+// Storyboard represents preview storyboard metadata for a video.
+type Storyboard struct {
+	VideoID  string   `json:"video_id"`
+	FormatID string   `json:"format_id"`
+	Rows     int      `json:"rows"`
+	Columns  int      `json:"columns"`
+	Width    int      `json:"width"`
+	Height   int      `json:"height"`
+	Sheets   []string `json:"sheets"`
+}
+
 var idPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{11}$`)
 
 // ExtractVideoID extracts an 11-character YouTube video ID from a URL, path, or raw ID.

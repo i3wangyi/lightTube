@@ -1,0 +1,72 @@
+{
+  "id": "sbFixture01",
+  "title": "Neural network training tips, part 4",
+  "duration": 1167,
+  "formats": [
+    {
+      "format_id": "sb2",
+      "format_note": "storyboard",
+      "width": 48,
+      "height": 27,
+      "rows": 10,
+      "columns": 10,
+      "fps": 0.0856898029134533,
+      "fragments": [
+        {
+          "url": "https://i.ytimg.com/sb/sbFixture01/storyboard3_L0/default.jpg?sqp=fixtureSqp01&sigh=fixtureSigh02",
+          "duration": 1167.0
+        }
+      ]
+    },
+    {
+      "format_id": "sb1",
+      "format_note": "storyboard",
+      "width": 60,
+      "height": 45,
+      "rows": 10,
+      "columns": 10,
+      "fps": 0.10111396743787489,
+      "fragments": [
+        {
+          "url": "https://i.ytimg.com/sb/sbFixture01/storyboard3_L1/M0.jpg?sqp=fixtureSqp01&sigh=fixtureSigh03",
+          "duration": 988.9830508474577
+        },
+        {
+          "url": "https://i.ytimg.com/sb/sbFixture01/storyboard3_L1/M1.jpg?sqp=fixtureSqp01&sigh=fixtureSigh03",
+          "duration": 178.01694915254234
+        }
+      ]
+    },
+    {
+      "format_id": "sb0",
+      "format_note": "storyboard",
+      "width": 120,
+      "height": 90,
+      "rows": 5,
+      "columns": 5,
+      "fps": 0.10111396743787489,
+      "fragments": [
+        {
+          "url": "https://i.ytimg.com/sb/sbFixture01/storyboard3_L2/M0.jpg?sqp=fixtureSqp01&sigh=fixtureSigh01",
+          "duration": 247.24576271186442
+        },
+        {
+          "url": "https://i.ytimg.com/sb/sbFixture01/storyboard3_L2/M1.jpg?sqp=fixtureSqp01&sigh=fixtureSigh01",
+          "duration": 247.24576271186442
+        },
+        {
+          "url": "https://i.ytimg.com/sb/sbFixture01/storyboard3_L2/M2.jpg?sqp=fixtureSqp01&sigh=fixtureSigh01",
+          "duration": 247.24576271186442
+        },
+        {
+          "url": "https://i.ytimg.com/sb/sbFixture01/storyboard3_L2/M3.jpg?sqp=fixtureSqp01&sigh=fixtureSigh01",
+          "duration": 247.24576271186442
+        },
+        {
+          "url": "https://i.ytimg.com/sb/sbFixture01/storyboard3_L2/M4.jpg?sqp=fixtureSqp01&sigh=fixtureSigh01",
+          "duration": 178.01694915254234
+        }
+      ]
+    }
+  ]
+}

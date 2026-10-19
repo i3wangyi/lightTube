@@ -1,0 +1,47 @@
+{
+  "title": "channels",
+  "entries": [
+    {
+      "id": "UCfixturePublicSci000001",
+      "title": "Public Science Lab",
+      "channel": "Public Science Lab",
+      "channel_id": "UCfixturePublicSci000001",
+      "channel_url": "https://www.youtube.com/channel/UCfixturePublicSci000001",
+      "uploader_id": "@publicsciencelab",
+      "channel_follower_count": 12000,
+      "thumbnails": [
+        {
+          "url": "//yt3.googleusercontent.com/fixtureAvatar01=s88-c-k-c0x00ffffff-no-rj-mo",
+          "height": 88,
+          "width": 88
+        },
+        {
+          "url": "//yt3.googleusercontent.com/fixtureAvatar01=s176-c-k-c0x00ffffff-no-rj-mo",
+          "height": 176,
+          "width": 176
+        }
+      ]
+    },
+    {
+      "id": "UCfixturePaperCraft00002",
+      "title": "Paper Craft Studio",
+      "channel": "Paper Craft Studio",
+      "channel_id": "UCfixturePaperCraft00002",
+      "channel_url": "https://www.youtube.com/channel/UCfixturePaperCraft00002",
+      "uploader_id": "@papercraftstudio",
+      "channel_follower_count": 48000,
+      "thumbnails": [
+        {
+          "url": "//yt3.googleusercontent.com/fixtureAvatar02=s88-c-k-c0x00ffffff-no-rj-mo",
+          "height": 88,
+          "width": 88
+        },
+        {
+          "url": "//yt3.googleusercontent.com/fixtureAvatar02=s176-c-k-c0x00ffffff-no-rj-mo",
+          "height": 176,
+          "width": 176
+        }
+      ]
+    }
+  ]
+}

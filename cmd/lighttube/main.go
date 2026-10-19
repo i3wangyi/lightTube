@@ -73,6 +73,8 @@ func run(args []string) error {
 	var debugPlaySeconds int
 	var debugTab string
 	var debugHeap string
+	var debugHover int = -1
+	var debugHoverSeconds int
 	var filtered []string
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -104,6 +106,16 @@ func run(args []string) error {
 			i++
 			continue
 		}
+		if arg == "--debug-hover" && i+1 < len(args) {
+			debugHover, _ = strconv.Atoi(args[i+1])
+			i++
+			continue
+		}
+		if arg == "--debug-hover-seconds" && i+1 < len(args) {
+			debugHoverSeconds, _ = strconv.Atoi(args[i+1])
+			i++
+			continue
+		}
 		if arg == "--debug-heap" && i+1 < len(args) {
 			debugHeap = args[i+1]
 			i++
@@ -127,20 +139,26 @@ func run(args []string) error {
 			stderr:   os.Stderr,
 			stdin:    os.Stdin,
 			guiRunner: func(e *appEnv) error {
+				var hoverPtr *int
+				if debugHover >= 0 {
+					hoverPtr = &debugHover
+				}
 				return ui.Run(ui.Options{
-					YTClient:         e.ytClient,
-					Store:            e.store,
-					Player:           player.New(),
-					Account:          e.account,
-					Thumbs:           thumbs.New(),
-					Debug:            debug,
-					StartTime:        processStart,
-					Search:           search,
-					ExternalPlayer:   externalPlayer,
-					DebugPlay:        debugPlay,
-					DebugPlaySeconds: debugPlaySeconds,
-					DebugTab:         debugTab,
-					DebugHeap:        debugHeap,
+					YTClient:          e.ytClient,
+					Store:             e.store,
+					Player:            player.New(),
+					Account:           e.account,
+					Thumbs:            thumbs.New(),
+					Debug:             debug,
+					StartTime:         processStart,
+					Search:            search,
+					ExternalPlayer:    externalPlayer,
+					DebugPlay:         debugPlay,
+					DebugPlaySeconds:  debugPlaySeconds,
+					DebugTab:          debugTab,
+					DebugHover:        hoverPtr,
+					DebugHoverSeconds: debugHoverSeconds,
+					DebugHeap:         debugHeap,
 				})
 			},
 		}

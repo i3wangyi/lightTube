@@ -88,6 +88,7 @@ type Account struct {
 	// runMu serializes yt-dlp runs: each run rewrites the whole cookie file
 	// on exit, so parallel runs could interleave and corrupt it.
 	runMu      sync.Mutex
+	channelsMu sync.Mutex
 	Browser    string
 	CookieFile string
 	CacheDir   string
@@ -338,6 +339,171 @@ func (a *Account) Cached(kind FeedKind) ([]Video, error) {
 	return videos, nil
 }
 
+// Channels fetches the account's subscribed channels list via yt-dlp, caching results to disk.
+// At most one channels fetch is in flight at a time.
+func (a *Account) Channels(ctx context.Context) ([]Channel, error) {
+	if !a.SignedIn() {
+		return nil, ErrLoginRequired
+	}
+
+	a.channelsMu.Lock()
+	defer a.channelsMu.Unlock()
+
+	// For read-only calls like Channels and Storyboard, we pass a copy of the
+	// cookie file (created via PlaybackCookieFile) rather than a.CookieFile. Because
+	// yt-dlp rewrites whatever cookie file is passed to --cookies on exit, using a copy
+	// ensures that these read-only calls do not hold a.runMu while executing network
+	// requests, avoiding blocking concurrent or subsequent account feed refreshes.
+	cookieCopy, err := a.PlaybackCookieFile()
+	if err != nil {
+		return nil, fmt.Errorf("preparing playback cookie file: %w", err)
+	}
+
+	bin := a.BinaryPath
+	if bin == "" {
+		bin = "yt-dlp"
+	}
+
+	args := []string{
+		"--cookies", cookieCopy,
+		"--flat-playlist",
+		"-J",
+		"https://www.youtube.com/feed/channels",
+	}
+
+	cmd := exec.CommandContext(ctx, bin, args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	runErr := cmd.Run()
+	cleanStderr := SanitizeErrorOutput(stderr.String())
+	if runErr != nil {
+		if isLoginSignal(cleanStderr) {
+			return nil, fmt.Errorf("%w: %s", ErrLoginRequired, cleanStderr)
+		}
+		return nil, fmt.Errorf("yt-dlp channels error: %w (stderr: %s)", runErr, cleanStderr)
+	}
+
+	channels, err := ParseAccountChannelsJSON(stdout.Bytes())
+	if err != nil {
+		return nil, fmt.Errorf("parsing account channels: %w", err)
+	}
+
+	cacheFile := filepath.Join(a.CacheDir, "channels.json")
+	if enc, encErr := json.MarshalIndent(channels, "", "  "); encErr == nil {
+		_ = atomicWriteFile(cacheFile, enc)
+	}
+
+	return channels, nil
+}
+
+// CachedChannels reads the cached subscribed channels list without network execution.
+func (a *Account) CachedChannels() ([]Channel, error) {
+	cacheFile := filepath.Join(a.CacheDir, "channels.json")
+	data, err := os.ReadFile(cacheFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("reading cached channels: %w", err)
+	}
+
+	var channels []Channel
+	if err := json.Unmarshal(data, &channels); err != nil {
+		return nil, fmt.Errorf("decoding cached channels: %w", err)
+	}
+
+	return channels, nil
+}
+
+// Storyboard fetches video storyboard format (prefers sb0) via yt-dlp, caching to disk for 24 hours.
+func (a *Account) Storyboard(ctx context.Context, videoID string) (*Storyboard, error) {
+	if videoID == "" {
+		return nil, errors.New("empty video ID")
+	}
+
+	cacheDir := filepath.Join(a.CacheDir, "storyboards")
+	cacheFile := filepath.Join(cacheDir, videoID+".json")
+
+	if fi, err := os.Stat(cacheFile); err == nil && time.Since(fi.ModTime()) < 24*time.Hour {
+		if data, readErr := os.ReadFile(cacheFile); readErr == nil {
+			var sb Storyboard
+			if decErr := json.Unmarshal(data, &sb); decErr == nil && len(sb.Sheets) > 0 {
+				return &sb, nil
+			}
+		}
+	}
+
+	bin := a.BinaryPath
+	if bin == "" {
+		bin = "yt-dlp"
+	}
+
+	args := []string{
+		"-J",
+		"https://www.youtube.com/watch?v=" + videoID,
+	}
+
+	if a.SignedIn() {
+		// For read-only calls like Channels and Storyboard, we pass a copy of the
+		// cookie file (created via PlaybackCookieFile) rather than a.CookieFile. Because
+		// yt-dlp rewrites whatever cookie file is passed to --cookies on exit, using a copy
+		// ensures that these read-only calls do not hold a.runMu while executing network
+		// requests, avoiding blocking concurrent or subsequent account feed refreshes.
+		if cookieCopy, err := a.PlaybackCookieFile(); err == nil {
+			args = append([]string{"--cookies", cookieCopy}, args...)
+		}
+	}
+
+	cmd := exec.CommandContext(ctx, bin, args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	runErr := cmd.Run()
+	if runErr != nil {
+		cleanStderr := SanitizeErrorOutput(stderr.String())
+		return nil, fmt.Errorf("yt-dlp storyboard error: %w (stderr: %s)", runErr, cleanStderr)
+	}
+
+	sb, err := ParseStoryboardJSON(stdout.Bytes())
+	if err != nil {
+		return nil, fmt.Errorf("parsing storyboard JSON: %w", err)
+	}
+	if sb == nil {
+		return nil, nil
+	}
+
+	if enc, encErr := json.MarshalIndent(sb, "", "  "); encErr == nil {
+		_ = atomicWriteFile(cacheFile, enc)
+	}
+
+	return sb, nil
+}
+
+// CachedStoryboard reads the cached storyboard list from disk without executing network calls.
+func (a *Account) CachedStoryboard(videoID string) (*Storyboard, error) {
+	if videoID == "" {
+		return nil, errors.New("empty video ID")
+	}
+	cacheFile := filepath.Join(a.CacheDir, "storyboards", videoID+".json")
+	data, err := os.ReadFile(cacheFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("reading cached storyboard: %w", err)
+	}
+
+	var sb Storyboard
+	if err := json.Unmarshal(data, &sb); err != nil {
+		return nil, fmt.Errorf("decoding cached storyboard: %w", err)
+	}
+
+	return &sb, nil
+}
+
 // PlaybackCookieFile copies the cookie file for one mpv playback and returns
 // the copy's path. mpv's yt-dlp writes the cookie jar back on exit; with its
 // own copy it cannot interleave with a feed refresh that runs at that time.
@@ -504,6 +670,157 @@ func ParseAccountFeedJSON(data []byte) ([]Video, error) {
 	}
 
 	return videos, nil
+}
+
+// ParseAccountChannelsJSON parses yt-dlp flat-playlist -J output for account channels.
+func ParseAccountChannelsJSON(data []byte) ([]Channel, error) {
+	if len(bytes.TrimSpace(data)) == 0 || bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return []Channel{}, nil
+	}
+
+	var payload struct {
+		Entries []map[string]any `json:"entries"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return nil, fmt.Errorf("decoding channels JSON: %w", err)
+	}
+
+	channels := make([]Channel, 0, len(payload.Entries))
+	for _, entry := range payload.Entries {
+		id := cleanString(entry["id"])
+		if id == "" {
+			id = cleanString(entry["channel_id"])
+		}
+		if id == "" {
+			continue
+		}
+
+		title := cleanString(entry["title"])
+		if title == "" {
+			title = cleanString(entry["channel"])
+		}
+		if title == "" {
+			title = cleanString(entry["uploader"])
+		}
+
+		followerCount := cleanInt64(entry["channel_follower_count"])
+
+		channelURL := cleanString(entry["url"])
+		if channelURL == "" {
+			channelURL = cleanString(entry["channel_url"])
+		}
+		if channelURL == "" {
+			channelURL = "https://www.youtube.com/channel/" + id
+		}
+
+		var avatarURL string
+		if rawThumbs, ok := entry["thumbnails"].([]any); ok && len(rawThumbs) > 0 {
+			var bestH int
+			for _, item := range rawThumbs {
+				if m, ok := item.(map[string]any); ok {
+					u := cleanString(m["url"])
+					if u == "" {
+						continue
+					}
+					h := cleanInt(m["height"])
+					if avatarURL == "" || h > bestH {
+						avatarURL = u
+						bestH = h
+					}
+				}
+			}
+		}
+		if avatarURL != "" && strings.HasPrefix(avatarURL, "//") {
+			avatarURL = "https:" + avatarURL
+		}
+
+		channels = append(channels, Channel{
+			ID:            id,
+			Title:         title,
+			AvatarURL:     avatarURL,
+			FollowerCount: followerCount,
+			URL:           channelURL,
+		})
+	}
+
+	return channels, nil
+}
+
+// ParseStoryboardJSON parses yt-dlp -J output for storyboard format (prefers sb0, then any sb format).
+func ParseStoryboardJSON(data []byte) (*Storyboard, error) {
+	if len(bytes.TrimSpace(data)) == 0 || bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return nil, nil
+	}
+
+	var payload struct {
+		ID      string           `json:"id"`
+		Formats []map[string]any `json:"formats"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return nil, fmt.Errorf("decoding video formats JSON: %w", err)
+	}
+
+	var bestFormat map[string]any
+	for _, f := range payload.Formats {
+		fid := cleanString(f["format_id"])
+		if fid == "sb0" {
+			bestFormat = f
+			break
+		}
+	}
+	if bestFormat == nil {
+		for _, f := range payload.Formats {
+			fid := cleanString(f["format_id"])
+			note := cleanString(f["format_note"])
+			if strings.HasPrefix(fid, "sb") || note == "storyboard" {
+				bestFormat = f
+				break
+			}
+		}
+	}
+
+	if bestFormat == nil {
+		return nil, nil
+	}
+
+	formatID := cleanString(bestFormat["format_id"])
+	rows := cleanInt(bestFormat["rows"])
+	columns := cleanInt(bestFormat["columns"])
+	width := cleanInt(bestFormat["width"])
+	height := cleanInt(bestFormat["height"])
+
+	var sheets []string
+	if frags, ok := bestFormat["fragments"].([]any); ok && len(frags) > 0 {
+		for _, item := range frags {
+			if m, ok := item.(map[string]any); ok {
+				u := cleanString(m["url"])
+				if u != "" {
+					sheets = append(sheets, u)
+				}
+			}
+		}
+	}
+
+	if len(sheets) == 0 {
+		directURL := cleanString(bestFormat["url"])
+		if directURL != "" && !strings.Contains(directURL, "$M") {
+			sheets = append(sheets, directURL)
+		}
+	}
+
+	if len(sheets) == 0 {
+		return nil, nil
+	}
+
+	return &Storyboard{
+		VideoID:  payload.ID,
+		FormatID: formatID,
+		Rows:     rows,
+		Columns:  columns,
+		Width:    width,
+		Height:   height,
+		Sheets:   sheets,
+	}, nil
 }
 
 func cleanString(v any) string {

@@ -1,11 +1,13 @@
 package ui
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"image"
 	"image/color"
 	"io"
+	"net/http"
 	"os"
 	"os/signal"
 	"runtime"
@@ -16,7 +18,11 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/image/draw"
+	_ "golang.org/x/image/webp"
+
 	"gioui.org/app"
+	"gioui.org/f32"
 	"gioui.org/font"
 	"gioui.org/io/clipboard"
 	"gioui.org/io/event"
@@ -27,6 +33,7 @@ import (
 	"gioui.org/op"
 	"gioui.org/op/clip"
 	"gioui.org/op/paint"
+	"gioui.org/text"
 	"gioui.org/unit"
 	"gioui.org/widget"
 	"gioui.org/widget/material"
@@ -40,20 +47,22 @@ import (
 
 // Options holds runtime dependencies injected into the UI.
 type Options struct {
-	YTClient         *yt.Client
-	Store            *store.Store
-	Player           *player.Player
-	Account          *yt.Account
-	Thumbs           *thumbs.Manager
-	Window           *app.Window
-	Debug            bool
-	StartTime        time.Time
-	Search           string
-	ExternalPlayer   bool
-	DebugPlay        string
-	DebugPlaySeconds int
-	DebugTab         string
-	DebugHeap        string
+	YTClient          *yt.Client
+	Store             *store.Store
+	Player            *player.Player
+	Account           *yt.Account
+	Thumbs            *thumbs.Manager
+	Window            *app.Window
+	Debug             bool
+	StartTime         time.Time
+	Search            string
+	ExternalPlayer    bool
+	DebugPlay         string
+	DebugPlaySeconds  int
+	DebugTab          string
+	DebugHover        *int
+	DebugHoverSeconds int
+	DebugHeap         string
 }
 
 // UI manages the Gio window, layout, and event interactions.
@@ -179,6 +188,25 @@ type UI struct {
 	// ImageOp cache to avoid recreating texture operations on every frame
 	imageOps map[string]paint.ImageOp
 
+	// Account channels & Subscriptions channels row
+	accountChannelsFetching bool
+	subsChannelsList        layout.List
+	subsChannelClicks       []widget.Clickable
+
+	// Hover preview state
+	debugHover        int
+	debugHoverSeconds int
+	hoverVideoID      string
+	hoverCardIdx      int
+	hoverStartTime    time.Time
+	hoverFetchStarted bool
+	hoverCancel       context.CancelFunc
+	hoverFrames       []image.Image
+	// One ImageOp per frame, made once: a new ImageOp is a new GPU upload.
+	hoverOps           []paint.ImageOp
+	hoverFrameIdx      int
+	hoverLastFrameTime time.Time
+
 	// Event tags
 	windowTag       event.Tag
 	pasteTag        event.Tag
@@ -246,6 +274,9 @@ func New(opts Options) *UI {
 		externalPlayer:     extPlayer,
 		debugPlay:          opts.DebugPlay,
 		debugPlaySeconds:   opts.DebugPlaySeconds,
+		debugHover:         -1,
+		debugHoverSeconds:  opts.DebugHoverSeconds,
+		hoverCardIdx:       -1,
 		debugHeap:          opts.DebugHeap,
 		watchLastMouseMove: time.Now(),
 		watchVolume:        100,
@@ -257,6 +288,8 @@ func New(opts Options) *UI {
 		pasteTag:           new(int),
 	}
 
+	ui.subsChannelsList.Axis = layout.Horizontal
+
 	if ui.thumbs != nil {
 		ui.thumbs.SetOnEvict(func(id string) {
 			ui.sendAction(func() {
@@ -267,6 +300,12 @@ func New(opts Options) *UI {
 
 	if opts.DebugTab == "you" || opts.DebugTab == "account" {
 		ui.state.CurrentTab = TabAccount
+	}
+	if opts.DebugTab == "subs" || opts.DebugTab == "subscriptions" {
+		ui.state.CurrentTab = TabSubscriptions
+	}
+	if opts.DebugHover != nil {
+		ui.debugHover = *opts.DebugHover
 	}
 
 	go func() {
@@ -526,8 +565,24 @@ func (ui *UI) onStoreLoaded() {
 			cached, _ := ui.account.Cached(yt.FeedHome)
 			ui.state.SetVideos(cached)
 			ui.refreshAccountFeed(yt.FeedHome)
+			if chs, _ := ui.account.CachedChannels(); len(chs) > 0 {
+				ui.state.AccountChannels = chs
+			}
+			ui.refreshAccountChannels()
 		} else {
 			ui.loadMergedFeed()
+		}
+	} else if ui.state.CurrentTab == TabSubscriptions {
+		if ui.account != nil && ui.account.SignedIn() {
+			cached, _ := ui.account.Cached(yt.FeedSubs)
+			ui.state.SetVideos(cached)
+			ui.refreshAccountFeed(yt.FeedSubs)
+			if chs, _ := ui.account.CachedChannels(); len(chs) > 0 {
+				ui.state.AccountChannels = chs
+			}
+			ui.refreshAccountChannels()
+		} else {
+			ui.state.SetVideos(nil)
 		}
 	}
 	runtime.GC()
@@ -661,6 +716,8 @@ func (ui *UI) switchTab(t Tab) {
 		ui.dropThumbnails()
 	}
 	ui.state.SwitchTab(t)
+	ui.state.ActiveChannelFilter = ""
+	ui.state.ActiveChannelTitle = ""
 	switch t {
 	case TabHome:
 		ui.state.Subscriptions = ui.store.Subscriptions()
@@ -668,6 +725,10 @@ func (ui *UI) switchTab(t Tab) {
 			cached, _ := ui.account.Cached(yt.FeedHome)
 			ui.state.SetVideos(cached)
 			ui.refreshAccountFeed(yt.FeedHome)
+			if chs, _ := ui.account.CachedChannels(); len(chs) > 0 {
+				ui.state.AccountChannels = chs
+			}
+			ui.refreshAccountChannels()
 		} else {
 			if len(ui.state.Videos) == 0 {
 				ui.loadMergedFeed()
@@ -679,6 +740,10 @@ func (ui *UI) switchTab(t Tab) {
 			cached, _ := ui.account.Cached(yt.FeedSubs)
 			ui.state.SetVideos(cached)
 			ui.refreshAccountFeed(yt.FeedSubs)
+			if chs, _ := ui.account.CachedChannels(); len(chs) > 0 {
+				ui.state.AccountChannels = chs
+			}
+			ui.refreshAccountChannels()
 		} else {
 			ui.state.SetVideos(nil)
 		}
@@ -982,6 +1047,7 @@ func (ui *UI) toggleWatchLater(v yt.Video) {
 }
 
 func (ui *UI) dropThumbnails() {
+	ui.clearHover()
 	if ui.thumbs != nil {
 		ui.thumbs.Clear()
 	}
@@ -1529,12 +1595,35 @@ func (ui *UI) layoutMainArea(gtx layout.Context) layout.Dimensions {
 }
 
 // layoutChipsRow renders channel filter chips on Home:
-// "All" plus one chip per subscribed channel.
+// "All" plus one chip per account channel (when signed in) or per subscribed channel.
 func (ui *UI) layoutChipsRow(gtx layout.Context) layout.Dimensions {
-	subs := ui.state.Subscriptions
-	totalChips := 1 + len(subs)
+	var chipTitles []string
+	var chipIDs []string
 
-	for len(ui.channelChipClicks) < len(subs) {
+	if ui.account != nil && ui.account.SignedIn() && len(ui.state.AccountChannels) > 0 {
+		chipTitles = make([]string, len(ui.state.AccountChannels))
+		chipIDs = make([]string, len(ui.state.AccountChannels))
+		for i, ch := range ui.state.AccountChannels {
+			chipTitles[i] = ch.Title
+			chipIDs[i] = ch.ID
+		}
+	} else {
+		subs := ui.state.Subscriptions
+		chipTitles = make([]string, len(subs))
+		chipIDs = make([]string, len(subs))
+		for i, sub := range subs {
+			t := sub.Title
+			if t == "" {
+				t = sub.ChannelID
+			}
+			chipTitles[i] = t
+			chipIDs[i] = sub.ChannelID
+		}
+	}
+
+	totalChips := 1 + len(chipTitles)
+
+	for len(ui.channelChipClicks) < len(chipTitles) {
 		ui.channelChipClicks = append(ui.channelChipClicks, widget.Clickable{})
 	}
 
@@ -1554,20 +1643,24 @@ func (ui *UI) layoutChipsRow(gtx layout.Context) layout.Dimensions {
 				isSelected = ui.state.ActiveChannelFilter == ""
 				click = &ui.allChipClick
 			} else {
-				sub := subs[i-1]
-				title = sub.Title
-				if title == "" {
-					title = sub.ChannelID
-				}
-				isSelected = ui.state.ActiveChannelFilter == sub.ChannelID
+				title = chipTitles[i-1]
+				isSelected = ui.state.ActiveChannelFilter == chipIDs[i-1]
 				click = &ui.channelChipClicks[i-1]
 			}
 
 			if click.Clicked(gtx) {
 				if i == 0 {
 					ui.state.ActiveChannelFilter = ""
+					ui.state.ActiveChannelTitle = ""
+					ui.state.SelectedIndex = 0
+					if ui.account != nil && ui.account.SignedIn() {
+						cached, _ := ui.account.Cached(yt.FeedHome)
+						ui.state.SetVideos(cached)
+					} else {
+						ui.loadMergedFeed()
+					}
 				} else {
-					ui.state.ActiveChannelFilter = subs[i-1].ChannelID
+					ui.selectChannel(chipIDs[i-1], chipTitles[i-1])
 				}
 				ui.state.SelectedIndex = 0
 			}
@@ -1641,20 +1734,34 @@ func (ui *UI) layoutCardGrid(gtx layout.Context) layout.Dimensions {
 
 	numRows := (len(videos) + columns - 1) / columns
 
-	// Thumbnail prefetching: visible rows plus 2 rows margin.
+	// Thumbnail prefetching: visible rows plus 1 row margin.
 	firstRow := ui.gridList.Position.First
 	countRows := ui.gridList.Position.Count
 	if countRows == 0 {
 		countRows = 4
 	}
-	startIdx := (firstRow - 2) * columns
-	if startIdx < 0 {
-		startIdx = 0
+	startRow := firstRow - 1
+	if startRow < 0 {
+		startRow = 0
 	}
-	endIdx := (firstRow + countRows + 2) * columns
+	endRow := firstRow + countRows + 1
+	if endRow > numRows {
+		endRow = numRows
+	}
+	startIdx := startRow * columns
+	endIdx := endRow * columns
 	if endIdx > len(videos) {
 		endIdx = len(videos)
 	}
+
+	// Clamp total requested thumbnails so they never exceed half the budget.
+	if endIdx-startIdx > thumbs.MaxThumbnailsInHalfBudget {
+		endIdx = startIdx + thumbs.MaxThumbnailsInHalfBudget
+		if endIdx > len(videos) {
+			endIdx = len(videos)
+		}
+	}
+
 	for i := startIdx; i < endIdx; i++ {
 		ui.requestThumbnail(videos[i].ID)
 	}
@@ -1668,6 +1775,26 @@ func (ui *UI) layoutCardGrid(gtx layout.Context) layout.Dimensions {
 		Top:    unit.Dp(8),
 		Bottom: unit.Dp(16),
 	}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		if ui.state.ActiveChannelTitle != "" {
+			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					lbl := material.Label(ui.th, unit.Sp(20), ui.state.ActiveChannelTitle)
+					lbl.Font.Weight = font.Bold
+					lbl.Color = ui.colors.Text
+					return layout.Inset{Bottom: unit.Dp(16)}.Layout(gtx, lbl.Layout)
+				}),
+				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+					return ui.gridList.Layout(gtx, numRows, func(gtx layout.Context, rowIdx int) layout.Dimensions {
+						return layout.Inset{Bottom: unit.Dp(36)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
+								ui.layoutGridCards(gtx, rowIdx, columns, cardWidthPx, thumbHeightPx, videos)...,
+							)
+						})
+					})
+				}),
+			)
+		}
+
 		return ui.gridList.Layout(gtx, numRows, func(gtx layout.Context, rowIdx int) layout.Dimensions {
 			return layout.Inset{Bottom: unit.Dp(36)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 				return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
@@ -1721,6 +1848,11 @@ func (ui *UI) layoutCard(gtx layout.Context, index, cardWidthPx, thumbHeightPx i
 
 	isSelected := index == ui.state.SelectedIndex
 	isHovered := click.Hovered()
+	if ui.debugHover >= 0 && ui.debugHover == index {
+		if ui.debugHoverSeconds <= 0 || time.Since(ui.startTime) < time.Duration(ui.debugHoverSeconds)*time.Second {
+			isHovered = true
+		}
+	}
 	if isHovered {
 		pointer.CursorPointer.Add(gtx.Ops)
 	}
@@ -1804,9 +1936,50 @@ func (ui *UI) layoutCardThumbnail(gtx layout.Context, v yt.Video, w, h int, isSe
 	gtx.Constraints.Min = boxSize
 	gtx.Constraints.Max = boxSize
 
+	// Hover storyboard preview state logic
+	if isHovered {
+		if ui.hoverVideoID != v.ID {
+			ui.startHover(v.ID, -1)
+		}
+		if ui.hoverVideoID == v.ID {
+			if len(ui.hoverFrames) == 0 {
+				elapsed := gtx.Now.Sub(ui.hoverStartTime)
+				if elapsed >= 500*time.Millisecond {
+					if !ui.hoverFetchStarted {
+						ui.hoverFetchStarted = true
+						ctx, cancel := context.WithCancel(context.Background())
+						ui.hoverCancel = cancel
+						go ui.loadStoryboardPreview(ctx, v.ID)
+					}
+				} else {
+					gtx.Execute(op.InvalidateCmd{At: ui.hoverStartTime.Add(500 * time.Millisecond)})
+				}
+			} else {
+				if ui.hoverLastFrameTime.IsZero() {
+					ui.hoverLastFrameTime = gtx.Now
+				}
+				frameElapsed := gtx.Now.Sub(ui.hoverLastFrameTime)
+				if frameElapsed >= 400*time.Millisecond {
+					adv := int(frameElapsed / (400 * time.Millisecond))
+					ui.hoverFrameIdx = (ui.hoverFrameIdx + adv) % len(ui.hoverFrames)
+					ui.hoverLastFrameTime = gtx.Now
+				}
+				gtx.Execute(op.InvalidateCmd{At: ui.hoverLastFrameTime.Add(400 * time.Millisecond)})
+			}
+		}
+	} else {
+		if ui.hoverVideoID == v.ID {
+			ui.clearHover()
+		}
+	}
+
 	var imgOp paint.ImageOp
 	hasImg := false
-	if img, ok := ui.thumbs.Get(v.ID); ok && img != nil {
+
+	if isHovered && ui.hoverVideoID == v.ID && len(ui.hoverFrames) > 0 {
+		imgOp = ui.hoverOps[ui.hoverFrameIdx]
+		hasImg = true
+	} else if img, ok := ui.thumbs.Get(v.ID); ok && img != nil {
 		op, cached := ui.imageOps[v.ID]
 		if !cached {
 			op = paint.NewImageOp(img)
@@ -1832,6 +2005,17 @@ func (ui *UI) layoutCardThumbnail(gtx layout.Context, v yt.Video, w, h int, isSe
 					Src: imgOp,
 					Fit: widget.Cover,
 				}.Layout(gtx)
+			}
+
+			// Thin red progress line at thumbnail bottom while preview plays
+			if isHovered && ui.hoverVideoID == v.ID && len(ui.hoverFrames) > 0 {
+				progH := gtx.Dp(3)
+				progW := (ui.hoverFrameIdx + 1) * w / len(ui.hoverFrames)
+				if progW > w {
+					progW = w
+				}
+				progRect := clip.Rect(image.Rect(0, h-progH, progW, h))
+				paint.FillShape(gtx.Ops, ui.colors.Red, progRect.Op())
 			}
 
 			// Selected item outline: 2 dp text outline around the thumbnail
@@ -1920,19 +2104,25 @@ func (ui *UI) layoutSearchList(gtx layout.Context) layout.Dimensions {
 		ui.searchClockClicks = append(ui.searchClockClicks, widget.Clickable{})
 	}
 
-	// Request thumbnails for visible rows plus 3 margin.
+	// Request thumbnails for visible rows plus 1 row margin, clamped to half budget.
 	first := ui.searchList.Position.First
 	count := ui.searchList.Position.Count
 	if count == 0 {
 		count = 6
 	}
-	start := first - 3
+	start := first - 1
 	if start < 0 {
 		start = 0
 	}
-	end := first + count + 3
+	end := first + count + 1
 	if end > len(videos) {
 		end = len(videos)
+	}
+	if end-start > thumbs.MaxThumbnailsInHalfBudget {
+		end = start + thumbs.MaxThumbnailsInHalfBudget
+		if end > len(videos) {
+			end = len(videos)
+		}
 	}
 	for i := start; i < end; i++ {
 		ui.requestThumbnail(videos[i].ID)
@@ -2101,19 +2291,30 @@ func (ui *UI) layoutSubscriptionsView(gtx layout.Context) layout.Dimensions {
 
 	numCardRows := (len(videos) + columns - 1) / columns
 
-	// Thumbnail prefetching for visible card rows
+	// Thumbnail prefetching for visible card rows plus 1 row margin.
 	firstRow := ui.subPageList.Position.First
 	countRows := ui.subPageList.Position.Count
 	if countRows == 0 {
 		countRows = 4
 	}
-	startIdx := (firstRow - 2) * columns
-	if startIdx < 0 {
-		startIdx = 0
+	startRow := firstRow - 1
+	if startRow < 0 {
+		startRow = 0
 	}
-	endIdx := (firstRow + countRows + 2) * columns
+	endRow := firstRow + countRows + 1
+	if endRow > numCardRows {
+		endRow = numCardRows
+	}
+	startIdx := startRow * columns
+	endIdx := endRow * columns
 	if endIdx > len(videos) {
 		endIdx = len(videos)
+	}
+	if endIdx-startIdx > thumbs.MaxThumbnailsInHalfBudget {
+		endIdx = startIdx + thumbs.MaxThumbnailsInHalfBudget
+		if endIdx > len(videos) {
+			endIdx = len(videos)
+		}
 	}
 	for i := startIdx; i < endIdx; i++ {
 		ui.requestThumbnail(videos[i].ID)
@@ -2130,208 +2331,215 @@ func (ui *UI) layoutSubscriptionsView(gtx layout.Context) layout.Dimensions {
 		totalItems += 1
 	}
 
-	return ui.subPageList.Layout(gtx, totalItems, func(gtx layout.Context, idx int) layout.Dimensions {
-		if idx < manageStart {
-			return layout.Inset{
-				Left:   unit.Dp(16),
-				Right:  unit.Dp(16),
-				Top:    unit.Dp(8),
-				Bottom: unit.Dp(36),
-			}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
-					ui.layoutGridCards(gtx, idx, columns, cardWidthPx, thumbHeightPx, videos)...,
-				)
-			})
-		}
-
-		offset := idx - manageStart
-		switch offset {
-		case 0:
-			return layout.Inset{
-				Left:   unit.Dp(24),
-				Right:  unit.Dp(24),
-				Top:    unit.Dp(24),
-				Bottom: unit.Dp(16),
-			}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				lbl := material.Label(ui.th, unit.Sp(18), "Manage subscriptions")
-				lbl.Font.Weight = font.Bold
-				lbl.Color = ui.colors.Text
-				return lbl.Layout(gtx)
-			})
-		case 1:
-			return layout.Inset{
-				Left:   unit.Dp(24),
-				Right:  unit.Dp(24),
-				Bottom: unit.Dp(12),
-			}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						w := gtx.Dp(400)
-						gtx.Constraints.Min.X = w
-						gtx.Constraints.Max.X = w
-						return layout.Background{}.Layout(gtx,
-							func(gtx layout.Context) layout.Dimensions {
-								r := clip.UniformRRect(image.Rectangle{Max: gtx.Constraints.Min}, gtx.Dp(18))
-								paint.FillShape(gtx.Ops, ui.colors.Surface, r.Op(gtx.Ops))
-								return layout.Dimensions{Size: gtx.Constraints.Min}
-							},
-							func(gtx layout.Context) layout.Dimensions {
-								return layout.Inset{
-									Top:    unit.Dp(8),
-									Bottom: unit.Dp(8),
-									Left:   unit.Dp(14),
-									Right:  unit.Dp(14),
-								}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-									ed := material.Editor(ui.th, &ui.addChannelEditor, "Add channel: URL, @handle or UC id")
-									ed.Color = ui.colors.Text
-									ed.HintColor = ui.colors.Text2
-									ed.TextSize = unit.Sp(13)
-									return ed.Layout(gtx)
-								})
-							},
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return ui.layoutSubsChannelsRow(gtx)
+		}),
+		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+			return ui.subPageList.Layout(gtx, totalItems, func(gtx layout.Context, idx int) layout.Dimensions {
+				if idx < manageStart {
+					return layout.Inset{
+						Left:   unit.Dp(16),
+						Right:  unit.Dp(16),
+						Top:    unit.Dp(8),
+						Bottom: unit.Dp(36),
+					}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
+							ui.layoutGridCards(gtx, idx, columns, cardWidthPx, thumbHeightPx, videos)...,
 						)
-					}),
-					layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						btn := material.Button(ui.th, &ui.addChannelBtn, "Subscribe")
-						btn.Background = ui.colors.Red
-						btn.Color = color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff}
-						btn.CornerRadius = unit.Dp(18)
-						btn.Inset = layout.Inset{Top: unit.Dp(8), Bottom: unit.Dp(8), Left: unit.Dp(16), Right: unit.Dp(16)}
-						return btn.Layout(gtx)
-					}),
-				)
-			})
-		case 2:
-			return layout.Inset{
-				Left:   unit.Dp(24),
-				Right:  unit.Dp(24),
-				Bottom: unit.Dp(24),
-			}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						w := gtx.Dp(400)
-						gtx.Constraints.Min.X = w
-						gtx.Constraints.Max.X = w
-						return layout.Background{}.Layout(gtx,
-							func(gtx layout.Context) layout.Dimensions {
-								r := clip.UniformRRect(image.Rectangle{Max: gtx.Constraints.Min}, gtx.Dp(8))
-								paint.FillShape(gtx.Ops, ui.colors.Surface, r.Op(gtx.Ops))
-								return layout.Dimensions{Size: gtx.Constraints.Min}
-							},
-							func(gtx layout.Context) layout.Dimensions {
-								return layout.Inset{
-									Top:    unit.Dp(8),
-									Bottom: unit.Dp(8),
-									Left:   unit.Dp(14),
-									Right:  unit.Dp(14),
-								}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-									ed := material.Editor(ui.th, &ui.csvPathEditor, "Path to subscriptions.csv…")
-									ed.Color = ui.colors.Text
-									ed.HintColor = ui.colors.Text2
-									ed.TextSize = unit.Sp(13)
-									return ed.Layout(gtx)
-								})
-							},
-						)
-					}),
-					layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						btn := material.Button(ui.th, &ui.importCSVBtn, "Import")
-						btn.Background = ui.colors.Surface
-						btn.Color = ui.colors.Text
-						btn.CornerRadius = unit.Dp(8)
-						btn.Inset = layout.Inset{Top: unit.Dp(8), Bottom: unit.Dp(8), Left: unit.Dp(16), Right: unit.Dp(16)}
-						return btn.Layout(gtx)
-					}),
-				)
-			})
-		case 3:
-			return layout.Inset{
-				Left:   unit.Dp(24),
-				Right:  unit.Dp(24),
-				Bottom: unit.Dp(12),
-			}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				lbl := material.Label(ui.th, unit.Sp(16), fmt.Sprintf("Subscribed channels (%d)", len(subs)))
-				lbl.Font.Weight = font.Bold
-				lbl.Color = ui.colors.Text
-				return lbl.Layout(gtx)
-			})
-		default:
-			if len(subs) == 0 {
-				return layout.Inset{
-					Left:   unit.Dp(24),
-					Right:  unit.Dp(24),
-					Bottom: unit.Dp(16),
-				}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-					lbl := material.Label(ui.th, unit.Sp(14), "No channels subscribed yet.")
-					lbl.Color = ui.colors.Text2
-					return lbl.Layout(gtx)
-				})
-			}
-			subIdx := offset - 4
-			sub := subs[subIdx]
-			click := &ui.unsubscribeClicks[subIdx]
-			if click.Clicked(gtx) {
-				ui.removeSubscription(sub.ChannelID)
-			}
+					})
+				}
 
-			return layout.Inset{
-				Left:   unit.Dp(24),
-				Right:  unit.Dp(24),
-				Bottom: unit.Dp(8),
-			}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return layoutAvatar(gtx, ui.th, sub.ChannelID, sub.Title, 36)
-					}),
-					layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
-					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-						title := sub.Title
-						if title == "" {
-							title = sub.ChannelID
-						}
-						lbl := material.Label(ui.th, unit.Sp(15), title)
-						lbl.Font.Weight = font.Medium
+				offset := idx - manageStart
+				switch offset {
+				case 0:
+					return layout.Inset{
+						Left:   unit.Dp(24),
+						Right:  unit.Dp(24),
+						Top:    unit.Dp(24),
+						Bottom: unit.Dp(16),
+					}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						lbl := material.Label(ui.th, unit.Sp(18), "Manage subscriptions")
+						lbl.Font.Weight = font.Bold
 						lbl.Color = ui.colors.Text
 						return lbl.Layout(gtx)
-					}),
-					layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return click.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-							if click.Hovered() {
-								pointer.CursorPointer.Add(gtx.Ops)
-							}
-							chipBg := ui.colors.Surface
-							if click.Hovered() {
-								chipBg = ui.colors.SurfaceHover
-							}
-							return layout.Background{}.Layout(gtx,
-								func(gtx layout.Context) layout.Dimensions {
-									r := clip.UniformRRect(image.Rectangle{Max: gtx.Constraints.Min}, gtx.Dp(16))
-									paint.FillShape(gtx.Ops, chipBg, r.Op(gtx.Ops))
-									return layout.Dimensions{Size: gtx.Constraints.Min}
-								},
-								func(gtx layout.Context) layout.Dimensions {
-									return layout.Inset{
-										Top:    unit.Dp(6),
-										Bottom: unit.Dp(6),
-										Left:   unit.Dp(14),
-										Right:  unit.Dp(14),
-									}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-										lbl := material.Label(ui.th, unit.Sp(13), "Subscribed")
-										lbl.Color = ui.colors.Text
-										lbl.Font.Weight = font.Medium
-										return lbl.Layout(gtx)
-									})
-								},
-							)
+					})
+				case 1:
+					return layout.Inset{
+						Left:   unit.Dp(24),
+						Right:  unit.Dp(24),
+						Bottom: unit.Dp(12),
+					}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								w := gtx.Dp(400)
+								gtx.Constraints.Min.X = w
+								gtx.Constraints.Max.X = w
+								return layout.Background{}.Layout(gtx,
+									func(gtx layout.Context) layout.Dimensions {
+										r := clip.UniformRRect(image.Rectangle{Max: gtx.Constraints.Min}, gtx.Dp(18))
+										paint.FillShape(gtx.Ops, ui.colors.Surface, r.Op(gtx.Ops))
+										return layout.Dimensions{Size: gtx.Constraints.Min}
+									},
+									func(gtx layout.Context) layout.Dimensions {
+										return layout.Inset{
+											Top:    unit.Dp(8),
+											Bottom: unit.Dp(8),
+											Left:   unit.Dp(14),
+											Right:  unit.Dp(14),
+										}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+											ed := material.Editor(ui.th, &ui.addChannelEditor, "Add channel: URL, @handle or UC id")
+											ed.Color = ui.colors.Text
+											ed.HintColor = ui.colors.Text2
+											ed.TextSize = unit.Sp(13)
+											return ed.Layout(gtx)
+										})
+									},
+								)
+							}),
+							layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								btn := material.Button(ui.th, &ui.addChannelBtn, "Subscribe")
+								btn.Background = ui.colors.Red
+								btn.Color = color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff}
+								btn.CornerRadius = unit.Dp(18)
+								btn.Inset = layout.Inset{Top: unit.Dp(8), Bottom: unit.Dp(8), Left: unit.Dp(16), Right: unit.Dp(16)}
+								return btn.Layout(gtx)
+							}),
+						)
+					})
+				case 2:
+					return layout.Inset{
+						Left:   unit.Dp(24),
+						Right:  unit.Dp(24),
+						Bottom: unit.Dp(24),
+					}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								w := gtx.Dp(400)
+								gtx.Constraints.Min.X = w
+								gtx.Constraints.Max.X = w
+								return layout.Background{}.Layout(gtx,
+									func(gtx layout.Context) layout.Dimensions {
+										r := clip.UniformRRect(image.Rectangle{Max: gtx.Constraints.Min}, gtx.Dp(8))
+										paint.FillShape(gtx.Ops, ui.colors.Surface, r.Op(gtx.Ops))
+										return layout.Dimensions{Size: gtx.Constraints.Min}
+									},
+									func(gtx layout.Context) layout.Dimensions {
+										return layout.Inset{
+											Top:    unit.Dp(8),
+											Bottom: unit.Dp(8),
+											Left:   unit.Dp(14),
+											Right:  unit.Dp(14),
+										}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+											ed := material.Editor(ui.th, &ui.csvPathEditor, "Path to subscriptions.csv…")
+											ed.Color = ui.colors.Text
+											ed.HintColor = ui.colors.Text2
+											ed.TextSize = unit.Sp(13)
+											return ed.Layout(gtx)
+										})
+									},
+								)
+							}),
+							layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								btn := material.Button(ui.th, &ui.importCSVBtn, "Import")
+								btn.Background = ui.colors.Surface
+								btn.Color = ui.colors.Text
+								btn.CornerRadius = unit.Dp(8)
+								btn.Inset = layout.Inset{Top: unit.Dp(8), Bottom: unit.Dp(8), Left: unit.Dp(16), Right: unit.Dp(16)}
+								return btn.Layout(gtx)
+							}),
+						)
+					})
+				case 3:
+					return layout.Inset{
+						Left:   unit.Dp(24),
+						Right:  unit.Dp(24),
+						Bottom: unit.Dp(12),
+					}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						lbl := material.Label(ui.th, unit.Sp(16), fmt.Sprintf("Subscribed channels (%d)", len(subs)))
+						lbl.Font.Weight = font.Bold
+						lbl.Color = ui.colors.Text
+						return lbl.Layout(gtx)
+					})
+				default:
+					if len(subs) == 0 {
+						return layout.Inset{
+							Left:   unit.Dp(24),
+							Right:  unit.Dp(24),
+							Bottom: unit.Dp(16),
+						}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							lbl := material.Label(ui.th, unit.Sp(14), "No channels subscribed yet.")
+							lbl.Color = ui.colors.Text2
+							return lbl.Layout(gtx)
 						})
-					}),
-				)
+					}
+					subIdx := offset - 4
+					sub := subs[subIdx]
+					click := &ui.unsubscribeClicks[subIdx]
+					if click.Clicked(gtx) {
+						ui.removeSubscription(sub.ChannelID)
+					}
+
+					return layout.Inset{
+						Left:   unit.Dp(24),
+						Right:  unit.Dp(24),
+						Bottom: unit.Dp(8),
+					}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								return layoutAvatar(gtx, ui.th, sub.ChannelID, sub.Title, 36)
+							}),
+							layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
+							layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+								title := sub.Title
+								if title == "" {
+									title = sub.ChannelID
+								}
+								lbl := material.Label(ui.th, unit.Sp(15), title)
+								lbl.Font.Weight = font.Medium
+								lbl.Color = ui.colors.Text
+								return lbl.Layout(gtx)
+							}),
+							layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								return click.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+									if click.Hovered() {
+										pointer.CursorPointer.Add(gtx.Ops)
+									}
+									chipBg := ui.colors.Surface
+									if click.Hovered() {
+										chipBg = ui.colors.SurfaceHover
+									}
+									return layout.Background{}.Layout(gtx,
+										func(gtx layout.Context) layout.Dimensions {
+											r := clip.UniformRRect(image.Rectangle{Max: gtx.Constraints.Min}, gtx.Dp(16))
+											paint.FillShape(gtx.Ops, chipBg, r.Op(gtx.Ops))
+											return layout.Dimensions{Size: gtx.Constraints.Min}
+										},
+										func(gtx layout.Context) layout.Dimensions {
+											return layout.Inset{
+												Top:    unit.Dp(6),
+												Bottom: unit.Dp(6),
+												Left:   unit.Dp(14),
+												Right:  unit.Dp(14),
+											}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+												lbl := material.Label(ui.th, unit.Sp(13), "Subscribed")
+												lbl.Color = ui.colors.Text
+												lbl.Font.Weight = font.Medium
+												return lbl.Layout(gtx)
+											})
+										},
+									)
+								})
+							}),
+						)
+					})
+				}
 			})
-		}
-	})
+		}),
+	)
 }
 
 func (ui *UI) saveSettings() {
@@ -3300,18 +3508,25 @@ func (ui *UI) layoutUpNextList(gtx layout.Context, widthPx int) layout.Dimension
 		ui.upNextClicks = append(ui.upNextClicks, widget.Clickable{})
 	}
 
+	// Request thumbnails for visible rows plus 1 row margin, clamped to half budget.
 	first := ui.upNextList.Position.First
 	count := ui.upNextList.Position.Count
 	if count == 0 {
 		count = 6
 	}
-	start := first - 2
+	start := first - 1
 	if start < 0 {
 		start = 0
 	}
-	end := first + count + 2
+	end := first + count + 1
 	if end > len(videos) {
 		end = len(videos)
+	}
+	if end-start > thumbs.MaxThumbnailsInHalfBudget {
+		end = start + thumbs.MaxThumbnailsInHalfBudget
+		if end > len(videos) {
+			end = len(videos)
+		}
 	}
 	for i := start; i < end; i++ {
 		ui.requestThumbnail(videos[i].ID)
@@ -3379,4 +3594,293 @@ func (ui *UI) layoutUpNextList(gtx layout.Context, widthPx int) layout.Dimension
 			})
 		}),
 	)
+}
+
+// layoutSubsChannelsRow renders the horizontal row of account channel avatars at the top of Subscriptions.
+func (ui *UI) layoutSubsChannelsRow(gtx layout.Context) layout.Dimensions {
+	type channelItem struct {
+		id        string
+		title     string
+		avatarURL string
+	}
+	var items []channelItem
+
+	if ui.account != nil && ui.account.SignedIn() && len(ui.state.AccountChannels) > 0 {
+		for _, ch := range ui.state.AccountChannels {
+			items = append(items, channelItem{id: ch.ID, title: ch.Title, avatarURL: ch.AvatarURL})
+		}
+	} else {
+		for _, sub := range ui.state.Subscriptions {
+			title := sub.Title
+			if title == "" {
+				title = sub.ChannelID
+			}
+			items = append(items, channelItem{id: sub.ChannelID, title: title, avatarURL: ""})
+		}
+	}
+
+	if len(items) == 0 {
+		return layout.Dimensions{}
+	}
+
+	for len(ui.subsChannelClicks) < len(items) {
+		ui.subsChannelClicks = append(ui.subsChannelClicks, widget.Clickable{})
+	}
+
+	ui.subsChannelsList.Axis = layout.Horizontal
+
+	return layout.Inset{
+		Left:   unit.Dp(16),
+		Right:  unit.Dp(16),
+		Top:    unit.Dp(12),
+		Bottom: unit.Dp(16),
+	}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				lbl := material.Label(ui.th, unit.Sp(16), "Channels")
+				lbl.Font.Weight = font.Bold
+				lbl.Color = ui.colors.Text
+				return layout.Inset{Bottom: unit.Dp(8)}.Layout(gtx, lbl.Layout)
+			}),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				return ui.subsChannelsList.Layout(gtx, len(items), func(gtx layout.Context, i int) layout.Dimensions {
+					item := items[i]
+					click := &ui.subsChannelClicks[i]
+					if click.Clicked(gtx) {
+						ui.selectChannel(item.id, item.title)
+					}
+					if click.Hovered() {
+						pointer.CursorPointer.Add(gtx.Ops)
+					}
+
+					itemWidth := gtx.Dp(76)
+					gtx.Constraints.Min.X = itemWidth
+					gtx.Constraints.Max.X = itemWidth
+
+					return click.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						return layout.Inset{Right: unit.Dp(12)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							return layout.Flex{Axis: layout.Vertical, Alignment: layout.Middle}.Layout(gtx,
+								// 64 dp avatar circle
+								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+									if item.avatarURL != "" && ui.thumbs != nil {
+										if img, ok := ui.thumbs.GetAvatar(item.avatarURL); ok && img != nil {
+											sizePx := gtx.Dp(64)
+											box := image.Pt(sizePx, sizePx)
+											gtx.Constraints.Min = box
+											gtx.Constraints.Max = box
+											circle := clip.Ellipse(image.Rect(0, 0, sizePx, sizePx))
+											cl := circle.Push(gtx.Ops)
+											imgOp := paint.NewImageOp(img)
+											sz := imgOp.Size()
+											scaleX := float32(sizePx) / float32(sz.X)
+											scaleY := float32(sizePx) / float32(sz.Y)
+											aff := f32.Affine2D{}.Scale(f32.Point{}, f32.Pt(scaleX, scaleY))
+											affOp := op.Affine(aff).Push(gtx.Ops)
+											imgOp.Add(gtx.Ops)
+											paint.PaintOp{}.Add(gtx.Ops)
+											affOp.Pop()
+											cl.Pop()
+											return layout.Dimensions{Size: box}
+										}
+										ui.thumbs.RequestAvatar(item.avatarURL)
+									}
+									return layoutAvatar(gtx, ui.th, item.id, item.title, 64)
+								}),
+								layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
+								// Channel name: 12 sp, 1 line, ellipsis
+								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+									lbl := material.Label(ui.th, unit.Sp(12), item.title)
+									lbl.Color = ui.colors.Text
+									lbl.MaxLines = 1
+									lbl.Truncator = "…"
+									lbl.Alignment = text.Middle
+									return lbl.Layout(gtx)
+								}),
+							)
+						})
+					})
+				})
+			}),
+		)
+	})
+}
+
+// selectChannel filters Home feed to the given channel or loads its RSS feed.
+func (ui *UI) selectChannel(channelID, channelTitle string) {
+	ui.state.ActiveChannelFilter = channelID
+	ui.state.ActiveChannelTitle = channelTitle
+	ui.state.SelectedIndex = 0
+	if ui.state.CurrentTab != TabHome {
+		ui.switchTab(TabHome)
+		ui.state.ActiveChannelFilter = channelID
+		ui.state.ActiveChannelTitle = channelTitle
+	}
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		videos, err := ui.ytClient.Feed(ctx, channelID)
+		if err != nil {
+			return
+		}
+		ui.sendAction(func() {
+			if ui.state.ActiveChannelFilter == channelID {
+				ui.state.SetVideos(videos)
+			}
+		})
+		ui.invalidate()
+	}()
+}
+
+// refreshAccountChannels fetches account subscribed channels once per Subs page open.
+func (ui *UI) refreshAccountChannels() {
+	if ui.account == nil || !ui.account.SignedIn() || ui.accountChannelsFetching {
+		return
+	}
+	ui.accountChannelsFetching = true
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		channels, err := ui.account.Channels(ctx)
+		ui.sendAction(func() {
+			ui.accountChannelsFetching = false
+			if err == nil && len(channels) > 0 {
+				ui.state.AccountChannels = channels
+			}
+		})
+		ui.invalidate()
+	}()
+}
+
+func (ui *UI) startHover(videoID string, cardIdx int) {
+	if ui.hoverVideoID == videoID {
+		return
+	}
+	ui.clearHover()
+	ui.hoverVideoID = videoID
+	ui.hoverCardIdx = cardIdx
+	ui.hoverStartTime = time.Now()
+	ui.hoverFetchStarted = false
+}
+
+func (ui *UI) clearHover() {
+	if ui.hoverCancel != nil {
+		ui.hoverCancel()
+		ui.hoverCancel = nil
+	}
+	ui.hoverVideoID = ""
+	ui.hoverCardIdx = -1
+	ui.hoverStartTime = time.Time{}
+	ui.hoverFetchStarted = false
+	ui.hoverFrames = nil
+	ui.hoverOps = nil
+	ui.hoverFrameIdx = 0
+	ui.hoverLastFrameTime = time.Time{}
+}
+
+func (ui *UI) loadStoryboardPreview(ctx context.Context, videoID string) {
+	if ui.account == nil {
+		return
+	}
+	sb, err := ui.account.Storyboard(ctx, videoID)
+	if err != nil || sb == nil || len(sb.Sheets) == 0 {
+		return
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	frames, err := ui.fetchStoryboardFrames(ctx, sb)
+	if err != nil || len(frames) == 0 {
+		return
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	ui.sendAction(func() {
+		if ui.hoverVideoID == videoID {
+			ui.hoverFrames = frames
+			ui.hoverOps = make([]paint.ImageOp, len(frames))
+			for i, f := range frames {
+				ui.hoverOps[i] = paint.NewImageOp(f)
+			}
+			ui.hoverFrameIdx = 0
+			ui.hoverLastFrameTime = time.Now()
+		}
+	})
+	ui.invalidate()
+}
+
+func (ui *UI) fetchStoryboardFrames(ctx context.Context, sb *yt.Storyboard) ([]image.Image, error) {
+	if sb == nil || len(sb.Sheets) == 0 {
+		return nil, nil
+	}
+	sheetsToFetch := sb.Sheets
+	if len(sheetsToFetch) > 6 {
+		urls := make([]string, 6)
+		for i := 0; i < 6; i++ {
+			idx := i * (len(sb.Sheets) - 1) / 5
+			urls[i] = sb.Sheets[idx]
+		}
+		sheetsToFetch = urls
+	}
+
+	var allFrames []image.Image
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	for _, sheetURL := range sheetsToFetch {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, sheetURL, nil)
+		if err != nil {
+			continue
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			continue
+		}
+		sheetData, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil || resp.StatusCode != http.StatusOK {
+			continue
+		}
+
+		sheetImg, _, err := image.Decode(bytes.NewReader(sheetData))
+		if err != nil {
+			continue
+		}
+
+		rows := sb.Rows
+		cols := sb.Columns
+		if rows <= 0 {
+			rows = 3
+		}
+		if cols <= 0 {
+			cols = 3
+		}
+		frameW := sb.Width
+		frameH := sb.Height
+		if frameW <= 0 {
+			frameW = sheetImg.Bounds().Dx() / cols
+		}
+		if frameH <= 0 {
+			frameH = sheetImg.Bounds().Dy() / rows
+		}
+		if frameW <= 0 || frameH <= 0 {
+			continue
+		}
+
+		for r := 0; r < rows; r++ {
+			for c := 0; c < cols; c++ {
+				minX := sheetImg.Bounds().Min.X + c*frameW
+				minY := sheetImg.Bounds().Min.Y + r*frameH
+				frameRect := image.Rect(minX, minY, minX+frameW, minY+frameH)
+
+				dst := image.NewRGBA(image.Rect(0, 0, frameW, frameH))
+				draw.Draw(dst, dst.Bounds(), sheetImg, frameRect.Min, draw.Src)
+				allFrames = append(allFrames, dst)
+			}
+		}
+	}
+	return allFrames, nil
 }
