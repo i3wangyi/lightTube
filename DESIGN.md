@@ -159,3 +159,51 @@ rectangles, clock, counter-clockwise arrow). No icon font, no image files.
 - Do NOT let Gio scan every system font. Load only the needed font files
   into an explicit collection. Measure startup with both choices and keep
   the faster one that still renders CJK titles.
+
+## Phase 8: sharp thumbnails, account channels, moving thumbnails
+
+Measured 2026-10-19: `i.ytimg.com/vi/<id>/hq720.jpg` is 1280x720 (~84 KB),
+`hqdefault.jpg` 480x360 (4:3 with black bars), `mqdefault.jpg` 320x180 (the
+phase 3 choice, too soft at scale 2). `yt-dlp --cookies <file> --flat-playlist
+-J https://www.youtube.com/feed/channels` lists the account's channels in
+about 1.4 s (id, title, follower count, avatar URL `//yt3.googleusercontent...`).
+`yt-dlp -J <video>` (about 6 s) lists storyboard formats: sb0 = 320x180
+frames, 3x3 per sheet, one frame per ~10 s, sheet URLs carry signed query
+params (they cannot be built by hand).
+
+### Thumbnails
+- Fetch order: hq720.jpg, then hqdefault.jpg cropped to 16:9 (remove the
+  bars), then mqdefault.jpg. Disk cache file `<id>-hq.jpg` (old `<id>.jpg`
+  files are low-res; ignore them).
+- Decode, then scale to the largest size shown: card width in px at the
+  current scale, capped at 640x360. One RGBA copy, shared with the ImageOp.
+- Memory LRU bounded by bytes (48 MB), not by count. The UI must never
+  request more thumbnails in one frame than fit in half the budget: limit
+  the prefetch margin (visible rows plus 1 row) and clamp the total.
+
+### Account channels (signed in)
+- `Account.Channels(ctx)` with a disk cache like the feeds; refresh once per
+  Subs page open, at most one in flight.
+- Subs page, top: a horizontal row "Channels" of avatar circles (64 dp,
+  image from the avatar URL, fallback the letter circle) with the name
+  below (12 sp, 1 line, ellipsis), horizontal scroll. Then the existing
+  Subscriptions feed grid, then the manage section.
+- Home chips row (signed in): "All" plus one chip per account channel.
+- Click on a channel avatar or chip: show that channel's recent videos
+  (the existing RSS channel feed) in the grid, with the channel name as a
+  header and the chip active.
+- Avatars use a small separate image cache (URL key, 128x128 px max,
+  disk cache under the thumbs dir).
+
+### Moving thumbnails (hover preview, like YouTube)
+- After the pointer rests 500 ms on a card or search row thumbnail, fetch
+  the video's storyboard in the background (yt-dlp -J with cookies, cached
+  on disk per video for 24 h as the sheet URL list), then download up to 6
+  sb0 sheets spread evenly over the video and play their frames in order
+  in the thumbnail box, 400 ms per frame, looping. Show a thin red progress
+  line at the thumbnail bottom while it plays.
+- Only the hovered card animates. The frame timer (`op.InvalidateCmd` with
+  `At`) runs only while hovered and the window is visible; leaving the card
+  stops it and frees the frames. At most one storyboard fetch in flight;
+  leaving the card cancels it.
+- If there is no storyboard, keep the still thumbnail. Never block the UI.
