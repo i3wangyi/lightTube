@@ -192,7 +192,7 @@ exit 0
 
 	// Test YtDlpArgs when signed in.
 	args := account.YtDlpArgs()
-	expectedArg := "--ytdl-raw-options=cookies=" + cookieFile
+	expectedArg := "--ytdl-raw-options=cookies=" + cookieFile + ".play"
 	if len(args) != 1 || args[0] != expectedArg {
 		t.Errorf("expected YtDlpArgs %q, got %v", expectedArg, args)
 	}

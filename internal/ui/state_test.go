@@ -104,6 +104,13 @@ func TestResolveKeyAction(t *testing.T) {
 			expectedTab:    TabHistory,
 		},
 		{
+			name:           "Ctrl+5 switches to TabAccount",
+			keyName:        "5",
+			mods:           key.ModCtrl,
+			expectedAction: ActionSwitchTab,
+			expectedTab:    TabAccount,
+		},
+		{
 			name:           "Ctrl+L focuses search box",
 			keyName:        "L",
 			mods:           key.ModCtrl,

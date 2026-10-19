@@ -108,6 +108,7 @@ func run(args []string) error {
 					YTClient:         e.ytClient,
 					Store:            e.store,
 					Player:           player.New(),
+					Account:          e.account,
 					Thumbs:           thumbs.New(),
 					Debug:            debug,
 					StartTime:        processStart,
@@ -202,12 +203,17 @@ func runPlay(env *appEnv, args []string, debug bool) error {
 	}
 
 	p := player.New()
+	var extraArgs []string
+	if env.account != nil && env.account.SignedIn() {
+		extraArgs = env.account.YtDlpArgs()
+	}
 	opts := player.Options{
-		URL:    url,
-		Audio:  *audio,
-		Stdin:  env.stdin,
-		Stdout: env.stdout,
-		Stderr: env.stderr,
+		URL:       url,
+		Audio:     *audio,
+		ExtraArgs: extraArgs,
+		Stdin:     env.stdin,
+		Stdout:    env.stdout,
+		Stderr:    env.stderr,
 	}
 
 	if debug {

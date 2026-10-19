@@ -79,6 +79,19 @@ func TestPlayerBuildArgs(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "extra arguments included",
+			opts: Options{
+				URL:       "https://youtube.com/watch?v=123",
+				ExtraArgs: []string{"--ytdl-raw-options=cookies=/data/cookies.txt"},
+			},
+			check: func(t *testing.T, args []string) {
+				assertContains(t, args, "--ytdl-raw-options=cookies=/data/cookies.txt")
+				if args[len(args)-1] != "https://youtube.com/watch?v=123" {
+					t.Errorf("last argument should be URL, got %q", args[len(args)-1])
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {

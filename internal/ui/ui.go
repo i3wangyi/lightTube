@@ -7,7 +7,6 @@ import (
 	"image/color"
 	"io"
 	"os"
-	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"strings"
@@ -41,6 +40,7 @@ type Options struct {
 	YTClient         *yt.Client
 	Store            *store.Store
 	Player           *player.Player
+	Account          *yt.Account
 	Thumbs           *thumbs.Manager
 	Window           *app.Window
 	Debug            bool
@@ -56,6 +56,7 @@ type UI struct {
 	ytClient *yt.Client
 	store    *store.Store
 	player   *player.Player
+	account  *yt.Account
 	thumbs   *thumbs.Manager
 	window   *app.Window
 
@@ -113,8 +114,17 @@ type UI struct {
 	actionsMu sync.Mutex
 	actions   []func()
 
-	// Mini guide (4 items: Home, Subscriptions, Watch later, History)
-	guideClicks [4]widget.Clickable
+	// Account & Feeds
+	accountSigningIn     bool
+	accountError         string
+	accountBrowserEditor widget.Editor
+	accountSignInBtn     widget.Clickable
+	accountSignOutBtn    widget.Clickable
+	refreshMu            sync.Mutex
+	refreshingFeeds      map[yt.FeedKind]bool
+
+	// Mini guide (5 items: Home, Subscriptions, Watch later, History, Account)
+	guideClicks [5]widget.Clickable
 
 	// Top search bar
 	searchEditor widget.Editor
@@ -140,6 +150,7 @@ type UI struct {
 	csvPathEditor     widget.Editor
 	importCSVBtn      widget.Clickable
 	subList           layout.List
+	subPageList       layout.List
 	unsubscribeClicks []widget.Clickable
 
 	// Requested thumbnail set to prevent re-requesting in-flight images on every frame
@@ -176,10 +187,16 @@ func New(opts Options) *UI {
 
 	th, colors := NewDarkTheme()
 
+	acc := opts.Account
+	if acc == nil {
+		acc = yt.NewAccount()
+	}
+
 	ui := &UI{
 		ytClient:           ytClient,
 		store:              st,
 		player:             p,
+		account:            acc,
 		thumbs:             thMgr,
 		window:             opts.Window,
 		th:                 th,
@@ -196,6 +213,7 @@ func New(opts Options) *UI {
 		watchLastMouseMove: time.Now(),
 		watchVolume:        100,
 		currentScale:       2,
+		refreshingFeeds:    make(map[yt.FeedKind]bool),
 		requested:          make(map[string]bool),
 		imageOps:           make(map[string]paint.ImageOp),
 		windowTag:          new(int),
@@ -208,6 +226,10 @@ func New(opts Options) *UI {
 		ui.searchEditor.SetText(opts.Search)
 	}
 
+	ui.accountBrowserEditor.SingleLine = true
+	ui.accountBrowserEditor.Submit = true
+	ui.accountBrowserEditor.SetText(acc.Browser)
+
 	ui.addChannelEditor.SingleLine = true
 	ui.addChannelEditor.Submit = true
 
@@ -218,6 +240,7 @@ func New(opts Options) *UI {
 	ui.gridList.Axis = layout.Vertical
 	ui.searchList.Axis = layout.Vertical
 	ui.subList.Axis = layout.Vertical
+	ui.subPageList.Axis = layout.Vertical
 	ui.watchList.Axis = layout.Vertical
 	ui.upNextList.Axis = layout.Vertical
 
@@ -264,6 +287,12 @@ func (ui *UI) drainActions() {
 		if fn != nil {
 			fn()
 		}
+	}
+}
+
+func (ui *UI) invalidate() {
+	if ui.window != nil {
+		ui.window.Invalidate()
 	}
 }
 
@@ -340,11 +369,11 @@ func (ui *UI) eventLoop() error {
 								ui.sendAction(func() {
 									ui.triggerDebugPlay(ui.debugPlay, ui.debugPlaySeconds)
 								})
-								ui.window.Invalidate()
+								ui.invalidate()
 							}()
 						}
 					})
-					ui.window.Invalidate()
+					ui.invalidate()
 				}()
 			}
 
@@ -369,7 +398,7 @@ func (ui *UI) eventLoop() error {
 								ui.sendAction(func() {
 									ui.closeWatchPage()
 								})
-								ui.window.Invalidate()
+								ui.invalidate()
 							}()
 						}
 					}
@@ -396,7 +425,13 @@ func (ui *UI) eventLoop() error {
 func (ui *UI) onStoreLoaded() {
 	ui.state.Subscriptions = ui.store.Subscriptions()
 	if ui.state.CurrentTab == TabHome {
-		ui.loadMergedFeed()
+		if ui.account != nil && ui.account.SignedIn() {
+			cached, _ := ui.account.Cached(yt.FeedHome)
+			ui.state.SetVideos(cached)
+			ui.refreshAccountFeed(yt.FeedHome)
+		} else {
+			ui.loadMergedFeed()
+		}
 	}
 	runtime.GC()
 	debug.FreeOSMemory()
@@ -406,22 +441,165 @@ func (ui *UI) updatePower() {
 	ui.power = player.DetectPower()
 }
 
-func (ui *UI) switchTab(t Tab) {
-	ui.state.SwitchTab(t)
-	switch t {
+func (ui *UI) refreshAccountFeed(kind yt.FeedKind) {
+	if ui.account == nil || !ui.account.SignedIn() {
+		return
+	}
+	ui.refreshMu.Lock()
+	if ui.refreshingFeeds == nil {
+		ui.refreshingFeeds = make(map[yt.FeedKind]bool)
+	}
+	if ui.refreshingFeeds[kind] {
+		ui.refreshMu.Unlock()
+		return
+	}
+	ui.refreshingFeeds[kind] = true
+	ui.refreshMu.Unlock()
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		videos, err := ui.account.Feed(ctx, kind)
+		ui.sendAction(func() {
+			ui.refreshMu.Lock()
+			delete(ui.refreshingFeeds, kind)
+			ui.refreshMu.Unlock()
+
+			if err != nil {
+				cleanErr := yt.SanitizeErrorOutput(err.Error())
+				ui.accountError = cleanErr
+				ui.state.Status = cleanErr
+				return
+			}
+			ui.accountError = ""
+
+			// If user is currently on the corresponding tab, update the video list
+			switch kind {
+			case yt.FeedHome:
+				if ui.state.CurrentTab == TabHome {
+					ui.state.SetVideos(videos)
+					ui.state.Status = ""
+				}
+			case yt.FeedSubs:
+				if ui.state.CurrentTab == TabSubscriptions {
+					ui.state.SetVideos(videos)
+					ui.state.Status = ""
+				}
+			case yt.FeedWatchLater:
+				if ui.state.CurrentTab == TabWatchLater {
+					ui.state.SetVideos(videos)
+					ui.state.Status = ""
+				}
+			case yt.FeedHistory:
+				if ui.state.CurrentTab == TabHistory {
+					ui.state.SetVideos(videos)
+					ui.state.Status = ""
+				}
+			}
+		})
+		ui.invalidate()
+	}()
+}
+
+func (ui *UI) signInAccount() {
+	if ui.account == nil || ui.accountSigningIn {
+		return
+	}
+	spec := strings.TrimSpace(ui.accountBrowserEditor.Text())
+	if spec == "" {
+		spec = yt.DefaultBrowserSpec
+	}
+	ui.account.SetBrowser(spec)
+	ui.accountSigningIn = true
+	ui.accountError = ""
+	ui.state.Status = "Signing in…"
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		err := ui.account.SignIn(ctx)
+		ui.sendAction(func() {
+			ui.accountSigningIn = false
+			if err != nil {
+				cleanErr := yt.SanitizeErrorOutput(err.Error())
+				ui.accountError = cleanErr
+				ui.state.Status = cleanErr
+			} else {
+				ui.accountError = ""
+				ui.state.Status = "Signed in"
+				if ui.state.CurrentTab == TabHome {
+					cached, _ := ui.account.Cached(yt.FeedHome)
+					ui.state.SetVideos(cached)
+					ui.refreshAccountFeed(yt.FeedHome)
+				}
+			}
+		})
+		ui.invalidate()
+	}()
+}
+
+func (ui *UI) signOutAccount() {
+	if ui.account == nil {
+		return
+	}
+	_ = ui.account.SignOut()
+	ui.accountError = ""
+	ui.state.Status = "Signed out"
+	switch ui.state.CurrentTab {
 	case TabHome:
-		if len(ui.state.Subscriptions) == 0 {
-			ui.state.Subscriptions = ui.store.Subscriptions()
-		}
-		if len(ui.state.Videos) == 0 {
-			ui.loadMergedFeed()
-		}
+		ui.loadMergedFeed()
 	case TabSubscriptions:
-		ui.state.Subscriptions = ui.store.Subscriptions()
+		ui.state.SetVideos(nil)
 	case TabWatchLater:
 		ui.state.SetVideos(ui.store.WatchLater())
 	case TabHistory:
 		ui.state.SetVideos(ui.store.History())
+	}
+}
+
+func (ui *UI) switchTab(t Tab) {
+	ui.state.SwitchTab(t)
+	switch t {
+	case TabHome:
+		ui.state.Subscriptions = ui.store.Subscriptions()
+		if ui.account != nil && ui.account.SignedIn() {
+			cached, _ := ui.account.Cached(yt.FeedHome)
+			ui.state.SetVideos(cached)
+			ui.refreshAccountFeed(yt.FeedHome)
+		} else {
+			if len(ui.state.Videos) == 0 {
+				ui.loadMergedFeed()
+			}
+		}
+	case TabSubscriptions:
+		ui.state.Subscriptions = ui.store.Subscriptions()
+		if ui.account != nil && ui.account.SignedIn() {
+			cached, _ := ui.account.Cached(yt.FeedSubs)
+			ui.state.SetVideos(cached)
+			ui.refreshAccountFeed(yt.FeedSubs)
+		} else {
+			ui.state.SetVideos(nil)
+		}
+	case TabWatchLater:
+		if ui.account != nil && ui.account.SignedIn() {
+			cached, _ := ui.account.Cached(yt.FeedWatchLater)
+			ui.state.SetVideos(cached)
+			ui.refreshAccountFeed(yt.FeedWatchLater)
+		} else {
+			ui.state.SetVideos(ui.store.WatchLater())
+		}
+	case TabHistory:
+		if ui.account != nil && ui.account.SignedIn() {
+			cached, _ := ui.account.Cached(yt.FeedHistory)
+			ui.state.SetVideos(cached)
+			ui.refreshAccountFeed(yt.FeedHistory)
+		} else {
+			ui.state.SetVideos(ui.store.History())
+		}
+	case TabAccount:
+		// Account page
 	case TabSearch:
 		// Search results tab
 	}
@@ -467,7 +645,7 @@ func (ui *UI) search(query string) {
 			ui.state.SetVideos(videos)
 			ui.state.Status = ""
 		})
-		ui.window.Invalidate()
+		ui.invalidate()
 	}()
 }
 
@@ -512,7 +690,7 @@ func (ui *UI) loadMergedFeed() {
 				ui.upNextVideos = upNext
 			}
 		})
-		ui.window.Invalidate()
+		ui.invalidate()
 	}()
 }
 
@@ -532,7 +710,7 @@ func (ui *UI) addSubscription(target string) {
 			ui.sendAction(func() {
 				ui.state.Status = "Failed to resolve channel: " + err.Error()
 			})
-			ui.window.Invalidate()
+			ui.invalidate()
 			return
 		}
 
@@ -558,7 +736,7 @@ func (ui *UI) addSubscription(target string) {
 				ui.loadMergedFeed()
 			}
 		})
-		ui.window.Invalidate()
+		ui.invalidate()
 	}()
 }
 
@@ -575,7 +753,7 @@ func (ui *UI) importTakeout(path string) {
 			ui.sendAction(func() {
 				ui.state.Status = "CSV file error: " + err.Error()
 			})
-			ui.window.Invalidate()
+			ui.invalidate()
 			return
 		}
 		defer f.Close()
@@ -585,7 +763,7 @@ func (ui *UI) importTakeout(path string) {
 			ui.sendAction(func() {
 				ui.state.Status = "Failed parsing CSV: " + err.Error()
 			})
-			ui.window.Invalidate()
+			ui.invalidate()
 			return
 		}
 
@@ -598,7 +776,7 @@ func (ui *UI) importTakeout(path string) {
 				ui.loadMergedFeed()
 			}
 		})
-		ui.window.Invalidate()
+		ui.invalidate()
 	}()
 }
 
@@ -644,10 +822,16 @@ func (ui *UI) playVideoExternal(v yt.Video, audio bool) {
 		ui.state.SetVideos(ui.store.History())
 	}
 
+	var extraArgs []string
+	if ui.account != nil && ui.account.SignedIn() {
+		extraArgs = ui.account.YtDlpArgs()
+	}
+
 	opts := player.Options{
-		URL:   v.WatchURL(),
-		Title: v.Title,
-		Audio: audio,
+		URL:       v.WatchURL(),
+		Title:     v.Title,
+		Audio:     audio,
+		ExtraArgs: extraArgs,
 	}
 
 	go func() {
@@ -656,7 +840,7 @@ func (ui *UI) playVideoExternal(v yt.Video, audio bool) {
 			ui.sendAction(func() {
 				ui.state.Status = "Playback error: " + err.Error()
 			})
-			ui.window.Invalidate()
+			ui.invalidate()
 		}
 	}()
 }
@@ -719,7 +903,7 @@ func (ui *UI) requestThumbnail(vid string) {
 		ui.requestedMu.Lock()
 		delete(ui.requested, vid)
 		ui.requestedMu.Unlock()
-		ui.window.Invalidate()
+		ui.invalidate()
 	})
 }
 
@@ -754,6 +938,7 @@ func (ui *UI) layout(gtx layout.Context) layout.Dimensions {
 			key.Filter{Name: "2", Required: key.ModCtrl},
 			key.Filter{Name: "3", Required: key.ModCtrl},
 			key.Filter{Name: "4", Required: key.ModCtrl},
+			key.Filter{Name: "5", Required: key.ModCtrl},
 			key.Filter{Name: "L", Required: key.ModCtrl},
 			key.Filter{Name: "l", Required: key.ModCtrl},
 			key.Filter{Name: "V", Required: key.ModCtrl},
@@ -788,7 +973,7 @@ func (ui *UI) layout(gtx layout.Context) layout.Dimensions {
 		}
 
 		if ke, ok := evt.(key.Event); ok && ke.State == key.Press {
-			isEditorFocused := gtx.Focused(&ui.searchEditor) || gtx.Focused(&ui.addChannelEditor) || gtx.Focused(&ui.csvPathEditor)
+			isEditorFocused := gtx.Focused(&ui.searchEditor) || gtx.Focused(&ui.addChannelEditor) || gtx.Focused(&ui.csvPathEditor) || gtx.Focused(&ui.accountBrowserEditor)
 			if ui.state.CurrentTab == TabWatch {
 				action, tab, delta := ResolveWatchKeyAction(ke.Name, ke.Modifiers, isEditorFocused)
 				switch action {
@@ -1104,9 +1289,9 @@ func (ui *UI) layoutPolicyLabel(gtx layout.Context) layout.Dimensions {
 	)
 }
 
-// layoutMiniGuide renders the 72dp wide sidebar with 4 items:
-// Home, Subscriptions, Watch later, History.
-// Vector icons: house, stacked rectangles, clock, counter-clockwise arrow.
+// layoutMiniGuide renders the 72dp wide sidebar with 5 items:
+// Home, Subscriptions, Watch later, History, You (Account).
+// Vector icons: house, stacked rectangles, clock, counter-clockwise arrow, person.
 func (ui *UI) layoutMiniGuide(gtx layout.Context) layout.Dimensions {
 	guideWidth := gtx.Dp(72)
 	gtx.Constraints.Min.X = guideWidth
@@ -1121,6 +1306,7 @@ func (ui *UI) layoutMiniGuide(gtx layout.Context) layout.Dimensions {
 		{TabSubscriptions, "Subs", drawStackedRectsIcon},
 		{TabWatchLater, "Later", drawClockIcon},
 		{TabHistory, "History", drawHistoryIcon},
+		{TabAccount, "You", drawPersonIcon},
 	}
 
 	return layout.Inset{
@@ -1206,6 +1392,8 @@ func (ui *UI) layoutMainArea(gtx layout.Context) layout.Dimensions {
 		return ui.layoutSearchList(gtx)
 	case TabSubscriptions:
 		return ui.layoutSubscriptionsView(gtx)
+	case TabAccount:
+		return ui.layoutAccountView(gtx)
 	case TabHome:
 		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 			layout.Rigid(ui.layoutChipsRow),
@@ -1767,15 +1955,91 @@ func (ui *UI) layoutSubscriptionsView(gtx layout.Context) layout.Dimensions {
 		ui.unsubscribeClicks = append(ui.unsubscribeClicks, widget.Clickable{})
 	}
 
-	return layout.Inset{
-		Left:   unit.Dp(24),
-		Right:  unit.Dp(24),
-		Top:    unit.Dp(16),
-		Bottom: unit.Dp(24),
-	}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-			// Row 1: Add Channel
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+	// Signed in, the account Subs feed shows as card rows above the manage rows.
+	var videos []yt.Video
+	if ui.account != nil && ui.account.SignedIn() {
+		videos = ui.state.FilteredVideos()
+	}
+	availW := gtx.Constraints.Max.X - gtx.Dp(32)
+	colW := gtx.Dp(320)
+	gapX := gtx.Dp(16)
+	columns := (availW + gapX) / (colW + gapX)
+	if columns < 1 {
+		columns = 1
+	}
+
+	for len(ui.cardClicks) < len(videos) {
+		ui.cardClicks = append(ui.cardClicks, widget.Clickable{})
+	}
+	for len(ui.cardClockClicks) < len(videos) {
+		ui.cardClockClicks = append(ui.cardClockClicks, widget.Clickable{})
+	}
+
+	numCardRows := (len(videos) + columns - 1) / columns
+
+	// Thumbnail prefetching for visible card rows
+	firstRow := ui.subPageList.Position.First
+	countRows := ui.subPageList.Position.Count
+	if countRows == 0 {
+		countRows = 4
+	}
+	startIdx := (firstRow - 10) * columns
+	if startIdx < 0 {
+		startIdx = 0
+	}
+	endIdx := (firstRow + countRows + 10) * columns
+	if endIdx > len(videos) {
+		endIdx = len(videos)
+	}
+	for i := startIdx; i < endIdx; i++ {
+		ui.requestThumbnail(videos[i].ID)
+	}
+
+	cardWidthPx := (availW - (columns-1)*gapX) / columns
+	thumbHeightPx := cardWidthPx * 9 / 16
+
+	manageStart := numCardRows
+	totalItems := manageStart + 4
+	if len(subs) > 0 {
+		totalItems += len(subs)
+	} else {
+		totalItems += 1
+	}
+
+	return ui.subPageList.Layout(gtx, totalItems, func(gtx layout.Context, idx int) layout.Dimensions {
+		if idx < manageStart {
+			return layout.Inset{
+				Left:   unit.Dp(16),
+				Right:  unit.Dp(16),
+				Top:    unit.Dp(8),
+				Bottom: unit.Dp(36),
+			}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
+					ui.layoutGridCards(gtx, idx, columns, cardWidthPx, thumbHeightPx, videos)...,
+				)
+			})
+		}
+
+		offset := idx - manageStart
+		switch offset {
+		case 0:
+			return layout.Inset{
+				Left:   unit.Dp(24),
+				Right:  unit.Dp(24),
+				Top:    unit.Dp(24),
+				Bottom: unit.Dp(16),
+			}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				lbl := material.Label(ui.th, unit.Sp(18), "Manage subscriptions")
+				lbl.Font.Weight = font.Bold
+				lbl.Color = ui.colors.Text
+				return lbl.Layout(gtx)
+			})
+		case 1:
+			return layout.Inset{
+				Left:   unit.Dp(24),
+				Right:  unit.Dp(24),
+				Bottom: unit.Dp(12),
+			}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 				return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 						w := gtx.Dp(400)
@@ -1813,11 +2077,13 @@ func (ui *UI) layoutSubscriptionsView(gtx layout.Context) layout.Dimensions {
 						return btn.Layout(gtx)
 					}),
 				)
-			}),
-			layout.Rigid(layout.Spacer{Height: unit.Dp(12)}.Layout),
-
-			// Row 2: Import Takeout CSV
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			})
+		case 2:
+			return layout.Inset{
+				Left:   unit.Dp(24),
+				Right:  unit.Dp(24),
+				Bottom: unit.Dp(24),
+			}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 				return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 						w := gtx.Dp(400)
@@ -1855,86 +2121,236 @@ func (ui *UI) layoutSubscriptionsView(gtx layout.Context) layout.Dimensions {
 						return btn.Layout(gtx)
 					}),
 				)
-			}),
-			layout.Rigid(layout.Spacer{Height: unit.Dp(24)}.Layout),
+			})
+		case 3:
+			return layout.Inset{
+				Left:   unit.Dp(24),
+				Right:  unit.Dp(24),
+				Bottom: unit.Dp(12),
+			}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				lbl := material.Label(ui.th, unit.Sp(16), fmt.Sprintf("Subscribed channels (%d)", len(subs)))
+				lbl.Font.Weight = font.Bold
+				lbl.Color = ui.colors.Text
+				return lbl.Layout(gtx)
+			})
+		default:
+			if len(subs) == 0 {
+				return layout.Inset{
+					Left:   unit.Dp(24),
+					Right:  unit.Dp(24),
+					Bottom: unit.Dp(16),
+				}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+					lbl := material.Label(ui.th, unit.Sp(14), "No channels subscribed yet.")
+					lbl.Color = ui.colors.Text2
+					return lbl.Layout(gtx)
+				})
+			}
+			subIdx := offset - 4
+			sub := subs[subIdx]
+			click := &ui.unsubscribeClicks[subIdx]
+			if click.Clicked(gtx) {
+				ui.removeSubscription(sub.ChannelID)
+			}
 
-			// Channels header
+			return layout.Inset{
+				Left:   unit.Dp(24),
+				Right:  unit.Dp(24),
+				Bottom: unit.Dp(8),
+			}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return layoutAvatar(gtx, ui.th, sub.ChannelID, sub.Title, 36)
+					}),
+					layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
+					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+						title := sub.Title
+						if title == "" {
+							title = sub.ChannelID
+						}
+						lbl := material.Label(ui.th, unit.Sp(15), title)
+						lbl.Font.Weight = font.Medium
+						lbl.Color = ui.colors.Text
+						return lbl.Layout(gtx)
+					}),
+					layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return click.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							if click.Hovered() {
+								pointer.CursorPointer.Add(gtx.Ops)
+							}
+							chipBg := ui.colors.Surface
+							if click.Hovered() {
+								chipBg = ui.colors.SurfaceHover
+							}
+							return layout.Background{}.Layout(gtx,
+								func(gtx layout.Context) layout.Dimensions {
+									r := clip.UniformRRect(image.Rectangle{Max: gtx.Constraints.Min}, gtx.Dp(16))
+									paint.FillShape(gtx.Ops, chipBg, r.Op(gtx.Ops))
+									return layout.Dimensions{Size: gtx.Constraints.Min}
+								},
+								func(gtx layout.Context) layout.Dimensions {
+									return layout.Inset{
+										Top:    unit.Dp(6),
+										Bottom: unit.Dp(6),
+										Left:   unit.Dp(14),
+										Right:  unit.Dp(14),
+									}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+										lbl := material.Label(ui.th, unit.Sp(13), "Subscribed")
+										lbl.Color = ui.colors.Text
+										lbl.Font.Weight = font.Medium
+										return lbl.Layout(gtx)
+									})
+								},
+							)
+						})
+					}),
+				)
+			})
+		}
+	})
+}
+
+// layoutAccountView renders the Account page from phase 6:
+// - Status line: Signed in / Signed out / error reason
+// - 'Sign in with Chrome' button (red, like Subscribe) or 'Sign out' (surface)
+// - Browser specification text field (default chrome+gnomekeyring)
+// - Spinner-free 'Signing in…' text while in flight
+func (ui *UI) layoutAccountView(gtx layout.Context) layout.Dimensions {
+	for {
+		ev, ok := ui.accountBrowserEditor.Update(gtx)
+		if !ok {
+			break
+		}
+		if _, ok := ev.(widget.SubmitEvent); ok {
+			if ui.account != nil && !ui.account.SignedIn() && !ui.accountSigningIn {
+				ui.signInAccount()
+			}
+		}
+	}
+	if ui.accountSignInBtn.Clicked(gtx) {
+		ui.signInAccount()
+	}
+	if ui.accountSignOutBtn.Clicked(gtx) {
+		ui.signOutAccount()
+	}
+
+	return layout.Inset{
+		Left:   unit.Dp(24),
+		Right:  unit.Dp(24),
+		Top:    unit.Dp(24),
+		Bottom: unit.Dp(24),
+	}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+			// Title: "Account"
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				lbl := material.Label(ui.th, unit.Sp(18), fmt.Sprintf("Subscriptions (%d)", len(subs)))
+				lbl := material.Label(ui.th, unit.Sp(20), "Account")
 				lbl.Font.Weight = font.Bold
 				lbl.Color = ui.colors.Text
 				return lbl.Layout(gtx)
 			}),
-			layout.Rigid(layout.Spacer{Height: unit.Dp(12)}.Layout),
+			layout.Rigid(layout.Spacer{Height: unit.Dp(16)}.Layout),
 
-			// Channel list
-			layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-				if len(subs) == 0 {
-					lbl := material.Label(ui.th, unit.Sp(14), "No channels subscribed yet.")
+			// Status line: (Signed in / Signed out / error reason)
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				var statusText string
+				statusCol := ui.colors.Text
+				if ui.accountSigningIn {
+					statusText = "Signing in…"
+					statusCol = ui.colors.Text2
+				} else if ui.accountError != "" {
+					statusText = "Error: " + ui.accountError
+					statusCol = ui.colors.Red
+				} else if ui.account != nil && ui.account.SignedIn() {
+					statusText = "Signed in"
+					statusCol = ui.colors.Text
+				} else {
+					statusText = "Signed out"
+					statusCol = ui.colors.Text2
+				}
+
+				return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						prefixLbl := material.Label(ui.th, unit.Sp(14), "Status: ")
+						prefixLbl.Color = ui.colors.Text2
+						return prefixLbl.Layout(gtx)
+					}),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						lbl := material.Label(ui.th, unit.Sp(14), statusText)
+						lbl.Color = statusCol
+						lbl.Font.Weight = font.Medium
+						return lbl.Layout(gtx)
+					}),
+				)
+			}),
+			layout.Rigid(layout.Spacer{Height: unit.Dp(24)}.Layout),
+
+			// Browser spec text field
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				lbl := material.Label(ui.th, unit.Sp(13), "Browser specification")
+				lbl.Color = ui.colors.Text2
+				return lbl.Layout(gtx)
+			}),
+			layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				w := gtx.Dp(400)
+				gtx.Constraints.Min.X = w
+				gtx.Constraints.Max.X = w
+				return layout.Background{}.Layout(gtx,
+					func(gtx layout.Context) layout.Dimensions {
+						r := clip.UniformRRect(image.Rectangle{Max: gtx.Constraints.Min}, gtx.Dp(8))
+						paint.FillShape(gtx.Ops, ui.colors.Surface, r.Op(gtx.Ops))
+						return layout.Dimensions{Size: gtx.Constraints.Min}
+					},
+					func(gtx layout.Context) layout.Dimensions {
+						return layout.Inset{
+							Top:    unit.Dp(8),
+							Bottom: unit.Dp(8),
+							Left:   unit.Dp(14),
+							Right:  unit.Dp(14),
+						}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							ed := material.Editor(ui.th, &ui.accountBrowserEditor, yt.DefaultBrowserSpec)
+							ed.Color = ui.colors.Text
+							ed.HintColor = ui.colors.Text2
+							ed.TextSize = unit.Sp(13)
+							return ed.Layout(gtx)
+						})
+					},
+				)
+			}),
+			layout.Rigid(layout.Spacer{Height: unit.Dp(24)}.Layout),
+
+			// Button: 'Sign in with Chrome' (red) or 'Sign out' (surface) or 'Signing in…' text
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				// Size the button to its label, as YouTube does.
+				gtx.Constraints.Min.X = 0
+				if ui.accountSigningIn {
+					lbl := material.Label(ui.th, unit.Sp(14), "Signing in…")
 					lbl.Color = ui.colors.Text2
+					lbl.Font.Weight = font.Medium
 					return lbl.Layout(gtx)
 				}
-				return ui.subList.Layout(gtx, len(subs), func(gtx layout.Context, i int) layout.Dimensions {
-					sub := subs[i]
-					click := &ui.unsubscribeClicks[i]
-					if click.Clicked(gtx) {
-						ui.removeSubscription(sub.ChannelID)
-					}
 
-					return layout.Inset{Bottom: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-						return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
-							// Avatar circle
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return layoutAvatar(gtx, ui.th, sub.ChannelID, sub.Title, 36)
-							}),
-							layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
-							// Channel title
-							layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-								title := sub.Title
-								if title == "" {
-									title = sub.ChannelID
-								}
-								lbl := material.Label(ui.th, unit.Sp(15), title)
-								lbl.Font.Weight = font.Medium
-								lbl.Color = ui.colors.Text
-								return lbl.Layout(gtx)
-							}),
-							layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
-							// Subscribed chip (unsubscribes on click)
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return click.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-									if click.Hovered() {
-										pointer.CursorPointer.Add(gtx.Ops)
-									}
-									chipBg := ui.colors.Surface
-									if click.Hovered() {
-										chipBg = ui.colors.SurfaceHover
-									}
-									return layout.Background{}.Layout(gtx,
-										func(gtx layout.Context) layout.Dimensions {
-											r := clip.UniformRRect(image.Rectangle{Max: gtx.Constraints.Min}, gtx.Dp(16))
-											paint.FillShape(gtx.Ops, chipBg, r.Op(gtx.Ops))
-											return layout.Dimensions{Size: gtx.Constraints.Min}
-										},
-										func(gtx layout.Context) layout.Dimensions {
-											return layout.Inset{
-												Top:    unit.Dp(6),
-												Bottom: unit.Dp(6),
-												Left:   unit.Dp(14),
-												Right:  unit.Dp(14),
-											}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-												lbl := material.Label(ui.th, unit.Sp(13), "Subscribed")
-												lbl.Color = ui.colors.Text
-												lbl.Font.Weight = font.Medium
-												return lbl.Layout(gtx)
-											})
-										},
-									)
-								})
-							}),
-						)
-					})
-				})
+				if ui.account != nil && ui.account.SignedIn() {
+					if ui.accountSignOutBtn.Hovered() {
+						pointer.CursorPointer.Add(gtx.Ops)
+					}
+					btn := material.Button(ui.th, &ui.accountSignOutBtn, "Sign out")
+					btn.Background = ui.colors.Surface
+					btn.Color = ui.colors.Text
+					btn.CornerRadius = unit.Dp(18)
+					btn.Inset = layout.Inset{Top: unit.Dp(8), Bottom: unit.Dp(8), Left: unit.Dp(20), Right: unit.Dp(20)}
+					return btn.Layout(gtx)
+				}
+
+				if ui.accountSignInBtn.Hovered() {
+					pointer.CursorPointer.Add(gtx.Ops)
+				}
+				btn := material.Button(ui.th, &ui.accountSignInBtn, "Sign in with Chrome")
+				btn.Background = ui.colors.Red
+				btn.Color = color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff}
+				btn.CornerRadius = unit.Dp(18)
+				btn.Inset = layout.Inset{Top: unit.Dp(8), Bottom: unit.Dp(8), Left: unit.Dp(20), Right: unit.Dp(20)}
+				return btn.Layout(gtx)
 			}),
 		)
 	})
@@ -2050,9 +2466,9 @@ func (ui *UI) openWatchPage(v yt.Video) {
 			ui.embedPlayer = p
 		}
 
-		cookiePath := filepath.Join(ui.store.DataDir(), "cookies.txt")
-		if _, err := os.Stat(cookiePath); err != nil {
-			cookiePath = ""
+		cookiePath := ""
+		if ui.account != nil && ui.account.SignedIn() {
+			cookiePath, _ = ui.account.PlaybackCookieFile()
 		}
 
 		scale := ui.currentScale
@@ -2083,7 +2499,7 @@ func (ui *UI) openWatchPage(v yt.Video) {
 	ui.watchLastMouseMove = time.Now()
 	ui.hwdecLogged = false
 	ui.lastTimePoll = time.Now()
-	ui.window.Invalidate()
+	ui.invalidate()
 }
 
 func (ui *UI) closeWatchPage() {
@@ -2108,7 +2524,7 @@ func (ui *UI) closeWatchPage() {
 	if ui.debug {
 		fmt.Fprintf(os.Stderr, "watch page closed\n")
 	}
-	ui.window.Invalidate()
+	ui.invalidate()
 }
 
 func (ui *UI) triggerDebugPlay(urlStr string, playSeconds int) {

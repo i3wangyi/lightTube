@@ -14,6 +14,7 @@ const (
 	TabSubscriptions
 	TabWatchLater
 	TabHistory
+	TabAccount
 	TabSearch
 	TabWatch
 )
@@ -28,6 +29,8 @@ func (t Tab) String() string {
 		return "Watch later"
 	case TabHistory:
 		return "History"
+	case TabAccount:
+		return "Account"
 	case TabSearch:
 		return "Search"
 	case TabWatch:
@@ -60,7 +63,7 @@ const (
 // ResolveKeyAction determines the high-level UI action for a key press event.
 // It respects whether an editor currently holds focus.
 func ResolveKeyAction(name key.Name, mods key.Modifiers, isEditorFocused bool) (KeyAction, Tab, int) {
-	// Ctrl+1..4 switches to the 4 mini guide items (Home, Subs, Later, History).
+	// Ctrl+1..5 switches to the mini guide items (Home, Subs, Later, History, Account).
 	if mods.Contain(key.ModCtrl) {
 		switch name {
 		case "1":
@@ -71,6 +74,8 @@ func ResolveKeyAction(name key.Name, mods key.Modifiers, isEditorFocused bool) (
 			return ActionSwitchTab, TabWatchLater, 0
 		case "4":
 			return ActionSwitchTab, TabHistory, 0
+		case "5":
+			return ActionSwitchTab, TabAccount, 0
 		case "L", "l":
 			return ActionFocusSearch, 0, 0
 		case "V", "v":
@@ -118,6 +123,8 @@ func ResolveWatchKeyAction(name key.Name, mods key.Modifiers, isEditorFocused bo
 			return ActionSwitchTab, TabWatchLater, 0
 		case "4":
 			return ActionSwitchTab, TabHistory, 0
+		case "5":
+			return ActionSwitchTab, TabAccount, 0
 		case "L", "l":
 			return ActionFocusSearch, 0, 0
 		case "V", "v":

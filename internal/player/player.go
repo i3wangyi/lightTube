@@ -29,12 +29,13 @@ func DefaultSocketPath() string {
 
 // Options configures playback parameters.
 type Options struct {
-	URL    string
-	Title  string
-	Audio  bool
-	Stdin  io.Reader
-	Stdout io.Writer
-	Stderr io.Writer
+	URL       string
+	Title     string
+	Audio     bool
+	ExtraArgs []string
+	Stdin     io.Reader
+	Stdout    io.Writer
+	Stderr    io.Writer
 }
 
 // Player controls mpv playback and enforces single-instance execution via IPC.
@@ -95,6 +96,10 @@ func (p *Player) BuildArgs(opts Options) []string {
 
 	if p.appID != "" {
 		args = append(args, "--wayland-app-id="+p.appID)
+	}
+
+	if len(opts.ExtraArgs) > 0 {
+		args = append(args, opts.ExtraArgs...)
 	}
 
 	args = append(args, opts.URL)

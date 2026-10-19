@@ -165,30 +165,41 @@ func (a *Account) SignOut() error {
 	if err := os.Remove(a.CookieFile); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("removing cookie file: %w", err)
 	}
+	_ = os.Remove(a.CookieFile + ".play")
 	return nil
 }
 
-// SignIn extracts cookies once from the specified browser into the cookie file with mode 0600.
-func (a *Account) SignIn(ctx context.Context) error {
+// SetBrowser sets the --cookies-from-browser spec for later sign-ins.
+func (a *Account) SetBrowser(spec string) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.Browser = spec
+	a.mu.Unlock()
+}
 
-	dir := filepath.Dir(a.CookieFile)
+// SignIn extracts cookies once from the specified browser into the cookie file with mode 0600.
+// It extracts into a temporary file and renames it, so a failed sign-in keeps the old cookies.
+func (a *Account) SignIn(ctx context.Context) error {
+	a.mu.RLock()
+	browser, cookieFile := a.Browser, a.CookieFile
+	a.mu.RUnlock()
+
+	// Hold runMu, not mu, for the run: the UI calls SignedIn on every frame,
+	// and the extraction takes about 10 s.
+	a.runMu.Lock()
+	defer a.runMu.Unlock()
+
+	dir := filepath.Dir(cookieFile)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("creating cookie directory: %w", err)
 	}
 
-	// Create file with 0600 before yt-dlp writes to prevent permission exposure.
-	f, err := os.OpenFile(a.CookieFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-	if err != nil {
+	const header = "# Netscape HTTP Cookie File\n"
+	tmp := cookieFile + ".new"
+	defer os.Remove(tmp)
+	// Create the file with 0600 before yt-dlp writes to it.
+	if err := os.WriteFile(tmp, []byte(header), 0o600); err != nil {
 		return fmt.Errorf("creating cookie file: %w", err)
 	}
-	if _, err := f.WriteString("# Netscape HTTP Cookie File\n"); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("initializing cookie file: %w", err)
-	}
-	_ = f.Close()
-	_ = os.Chmod(a.CookieFile, 0o600)
 
 	bin := a.BinaryPath
 	if bin == "" {
@@ -196,8 +207,8 @@ func (a *Account) SignIn(ctx context.Context) error {
 	}
 
 	args := []string{
-		"--cookies-from-browser", a.Browser,
-		"--cookies", a.CookieFile,
+		"--cookies-from-browser", browser,
+		"--cookies", tmp,
 		"--skip-download",
 		"--playlist-items", "0",
 		"https://www.youtube.com",
@@ -208,11 +219,9 @@ func (a *Account) SignIn(ctx context.Context) error {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	a.runMu.Lock()
 	runErr := cmd.Run()
-	a.runMu.Unlock()
-	// Always restore 0600 permissions after external process writes.
-	_ = os.Chmod(a.CookieFile, 0o600)
+	// yt-dlp may recreate the file with the umask mode.
+	_ = os.Chmod(tmp, 0o600)
 
 	if runErr != nil {
 		cleanStderr := SanitizeErrorOutput(stderr.String())
@@ -222,11 +231,16 @@ func (a *Account) SignIn(ctx context.Context) error {
 		return fmt.Errorf("yt-dlp cookie extraction error: %w (stderr: %s)", runErr, cleanStderr)
 	}
 
-	fi, statErr := os.Stat(a.CookieFile)
-	if statErr != nil || fi.Size() <= int64(len("# Netscape HTTP Cookie File\n")) {
+	fi, statErr := os.Stat(tmp)
+	if statErr != nil || fi.Size() <= int64(len(header)) {
 		return errors.New("cookie extraction produced empty cookie file")
 	}
 
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err := os.Rename(tmp, cookieFile); err != nil {
+		return fmt.Errorf("installing cookie file: %w", err)
+	}
 	return nil
 }
 
@@ -338,12 +352,35 @@ func (a *Account) Cached(kind FeedKind) ([]Video, error) {
 	return videos, nil
 }
 
+// PlaybackCookieFile copies the cookie file for one mpv playback and returns
+// the copy's path. mpv's yt-dlp writes the cookie jar back on exit; with its
+// own copy it cannot interleave with a feed refresh that runs at that time.
+func (a *Account) PlaybackCookieFile() (string, error) {
+	a.runMu.Lock()
+	defer a.runMu.Unlock()
+	a.mu.RLock()
+	data, err := os.ReadFile(a.CookieFile)
+	a.mu.RUnlock()
+	if err != nil {
+		return "", err
+	}
+	dst := a.CookieFile + ".play"
+	if err := os.WriteFile(dst, data, 0o600); err != nil {
+		return "", err
+	}
+	return dst, nil
+}
+
 // YtDlpArgs returns extra arguments for mpv player to use cookies if signed in.
 func (a *Account) YtDlpArgs() []string {
 	if !a.SignedIn() {
 		return nil
 	}
-	return []string{"--ytdl-raw-options=cookies=" + a.CookieFile}
+	path, err := a.PlaybackCookieFile()
+	if err != nil {
+		return nil
+	}
+	return []string{"--ytdl-raw-options=cookies=" + path}
 }
 
 // YtDlpArgs returns extra arguments for mpv player from the default account if signed in.

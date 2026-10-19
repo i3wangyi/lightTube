@@ -419,3 +419,35 @@ func drawClearXIcon(gtx layout.Context, bounds image.Rectangle, col color.NRGBA)
 	p.LineTo(f32.Pt(cx-r, cy+r))
 	paint.FillShape(gtx.Ops, col, clip.Stroke{Path: p.End(), Width: float32(gtx.Dp(1.5))}.Op())
 }
+
+// drawPersonIcon draws the vector-drawn person icon for the 'You' (Account) guide item.
+func drawPersonIcon(gtx layout.Context, bounds image.Rectangle, col color.NRGBA) {
+	cx := float32(bounds.Min.X + bounds.Dx()/2)
+	minY := float32(bounds.Min.Y)
+	scale := float32(bounds.Dx()) / 24.0
+
+	strokeW := 1.8 * scale
+
+	// Head circle
+	headRadius := 3.5 * scale
+	headCenterY := minY + 7.5*scale
+	headRect := image.Rect(
+		int(cx-headRadius), int(headCenterY-headRadius),
+		int(cx+headRadius), int(headCenterY+headRadius),
+	)
+	paint.FillShape(gtx.Ops, col, clip.Stroke{
+		Path:  clip.Ellipse(headRect).Path(gtx.Ops),
+		Width: strokeW,
+	}.Op())
+
+	// Torso / shoulders curve
+	var p clip.Path
+	p.Begin(gtx.Ops)
+	p.MoveTo(f32.Pt(cx-7.0*scale, minY+20.0*scale))
+	p.QuadTo(f32.Pt(cx-6.5*scale, minY+14.0*scale), f32.Pt(cx, minY+14.0*scale))
+	p.QuadTo(f32.Pt(cx+6.5*scale, minY+14.0*scale), f32.Pt(cx+7.0*scale, minY+20.0*scale))
+	paint.FillShape(gtx.Ops, col, clip.Stroke{
+		Path:  p.End(),
+		Width: strokeW,
+	}.Op())
+}
