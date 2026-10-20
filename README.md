@@ -4,7 +4,7 @@ lightTube is a YouTube desktop client. It has four spaces: Watch, Shorts, Podcas
 
 ## Runtime requirements
 
-- Linux: Wayland or X11, `mpv` with `libmpv.so.2`, and `yt-dlp`.
+- Linux: Wayland or X11, `mpv` with `libmpv.so.2`, `yt-dlp`, and the Noto Sans and Noto Sans CJK fonts (Arch: `noto-fonts`, `noto-fonts-cjk`).
 - macOS: `libmpv` and `yt-dlp` from Homebrew. The app uses an external mpv window.
 - Windows: `yt-dlp.exe` on `PATH`. Add `mpv-2.dll` beside `lighttube.exe` for in-window playback.
 - Account sign-in reads a browser session through yt-dlp. Cookies stay on the local device. yt-dlp reads the saved cookie file for account feeds and playback.

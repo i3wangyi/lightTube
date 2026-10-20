@@ -22,6 +22,11 @@ New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
 Write-Host "Building lighttube.exe for $pkgName..."
 $env:CGO_ENABLED = "0"
 go build -trimpath -ldflags="-s -w -X main.version=$version" -o (Join-Path $stageDir "lighttube.exe") ./cmd/lighttube
+# $ErrorActionPreference does not stop on a failing native command.
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "go build failed with exit code $LASTEXITCODE"
+    exit $LASTEXITCODE
+}
 
 Copy-Item "README.md" -Destination $stageDir
 Copy-Item "LICENSE" -Destination $stageDir
