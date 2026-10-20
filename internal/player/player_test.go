@@ -136,9 +136,13 @@ func TestPlayerBuildArgs(t *testing.T) {
 				tt.setupPower(sysfsDir)
 			}
 			player := NewWithOptions(sockPath, sysfsDir, appID)
+			// Set the power state for every case, so a Mac on battery
+			// cannot change the AC expectations.
+			power := PowerAC
 			if tt.battery {
-				player.powerSource = func() Power { return PowerBattery }
+				power = PowerBattery
 			}
+			player.powerSource = func() Power { return power }
 			args := player.BuildArgs(tt.opts)
 			tt.check(t, args)
 		})

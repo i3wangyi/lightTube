@@ -21,7 +21,7 @@ func TestDarwinDirs(t *testing.T) {
 	if got, want := DataDir(), filepath.Join(home, "Library", "Application Support", "lighttube"); got != want {
 		t.Errorf("DataDir() = %q, want %q", got, want)
 	}
-	if got := extraPathDirs(); len(got) != 2 || got[0] != "/opt/homebrew/bin" {
+	if got := extraPathDirs(); len(got) != 2 || got[0] != "/opt/homebrew/bin" || got[1] != "/usr/local/bin" {
 		t.Errorf("extraPathDirs() = %v", got)
 	}
 }
