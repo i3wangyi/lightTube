@@ -800,9 +800,19 @@ func (ui *UI) loadWatchSpaceContent(chip int) {
 			unfin := ui.store.UnfinishedPositions(ui.currentAccountID())
 			var vids []yt.Video
 			for _, p := range unfin {
+				// Watch Continue holds Watch items and legacy records
+				// without provenance; other spaces keep their own lists.
+				if p.Position.Space != "" && p.Position.Space != SpaceWatch.String() {
+					continue
+				}
+				title := p.Position.Title
+				if title == "" {
+					title = p.VideoID
+				}
 				vids = append(vids, yt.Video{
 					ID:       p.VideoID,
-					Title:    p.VideoID,
+					Title:    title,
+					Channel:  p.Position.Show,
 					Duration: int(p.Position.Duration),
 				})
 			}
