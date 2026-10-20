@@ -9,7 +9,7 @@ license=('GPL-3.0-or-later')
 depends=('mpv' 'yt-dlp' 'wayland' 'libx11' 'libxkbcommon' 'libxcursor' 'libxfixes' 'mesa' 'fontconfig' 'noto-fonts' 'noto-fonts-cjk')
 makedepends=('go')
 source=("https://github.com/i3wangyi/lightTube/archive/refs/tags/v${pkgver}.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('81b84fdf0c1c3e018c6727db4427dfceb71796dc518624685d59f5da424f7879')
 
 build() {
   cd "$srcdir/lightTube-${pkgver}"

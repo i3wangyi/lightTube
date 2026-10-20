@@ -18,6 +18,6 @@ pkgbase = lighttube
 	depends = noto-fonts
 	depends = noto-fonts-cjk
 	source = https://github.com/i3wangyi/lightTube/archive/refs/tags/v0.1.0.tar.gz
-	sha256sums = SKIP
+	sha256sums = 81b84fdf0c1c3e018c6727db4427dfceb71796dc518624685d59f5da424f7879
 
 pkgname = lighttube

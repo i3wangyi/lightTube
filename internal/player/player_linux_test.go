@@ -50,8 +50,10 @@ func TestPlayerStopWaitsForPeerProcessExit(t *testing.T) {
 
 	cmd := exec.Command(os.Args[0], "-test.run=TestHelperProcessExit")
 	// Under -race the helper (this test binary) sleeps 1 s at exit by
-	// default, which equals Stop's wait; turn that sleep off.
-	cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=1", "HELPER_SOCK_PATH="+sockPath, "GORACE=atexit_sleep_ms=0")
+	// default, which equals Stop's wait; turn that sleep off and keep any
+	// other GORACE options the caller set.
+	gorace := strings.TrimSpace(os.Getenv("GORACE") + " atexit_sleep_ms=0")
+	cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=1", "HELPER_SOCK_PATH="+sockPath, "GORACE="+gorace)
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("failed to start helper process: %v", err)
 	}
