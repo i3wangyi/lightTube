@@ -7,16 +7,19 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"gioui.org/gpu/headless"
 	"gioui.org/io/input"
 	"gioui.org/io/key"
 	"gioui.org/layout"
 	"gioui.org/op"
 	"gioui.org/unit"
 
+	"lighttube/internal/embed"
 	"lighttube/internal/store"
 	"lighttube/internal/yt"
 )
@@ -431,12 +434,207 @@ func TestDemoZeroNetworkOrExecCalls(t *testing.T) {
 		}
 	}
 
+	// 8. Test Shorts space in demo mode
+	ui.switchSpace(SpaceShorts)
+	frame()
+	for c := 0; c < 3; c++ {
+		ui.spaces.Active().Chip = c
+		ui.loadShortsSpaceContent(c)
+		frame()
+	}
+	ui.spaces.ShortsNextClick.Click()
+	frame()
+	ui.spaces.ShortsPrevClick.Click()
+	frame()
+	ui.spaces.ShortsSaveClick.Click()
+	frame()
+	ui.spaces.ShortsRelatedClick.Click()
+	frame()
+	ui.spaces.ShortsOpenWatchBtn.Click()
+	frame()
+	ui.switchSpace(SpaceShorts)
+	ui.search("city")
+	frame()
+
+	// 9. Test Podcasts space in demo mode
+	ui.switchSpace(SpacePodcasts)
+	frame()
+	for c := 0; c < 3; c++ {
+		ui.spaces.Active().Chip = c
+		ui.loadPodcastsSpaceContent(c)
+		frame()
+	}
+	if len(ui.spaces.ShowClicks) > 0 {
+		ui.spaces.ShowClicks[0].Click()
+		frame()
+	}
+	if len(ui.spaces.EpisodeClicks) > 0 {
+		ui.spaces.EpisodeClicks[0].Click()
+		frame()
+		if ui.state.Status != "Playback disabled in demo" {
+			t.Fatalf("expected 'Playback disabled in demo' status on podcast episode click, got %q", ui.state.Status)
+		}
+	}
+	ui.search("view")
+	frame()
+
+	// 10. Test Music space in demo mode
+	ui.switchSpace(SpaceMusic)
+	frame()
+	for c := 0; c < 3; c++ {
+		ui.spaces.Active().Chip = c
+		ui.loadMusicSpaceContent(c)
+		frame()
+	}
+	ui.spaces.MusicOpenColBtn.Click()
+	frame()
+	ui.spaces.MusicSaveColBtn.Click()
+	frame()
+	if len(ui.spaces.TrackClicks) > 0 {
+		ui.spaces.TrackClicks[0].Click()
+		frame()
+		if ui.state.Status != "Playback disabled in demo" {
+			t.Fatalf("expected 'Playback disabled in demo' status on track click, got %q", ui.state.Status)
+		}
+	}
+	ui.spaces.MusicDockPlay.Click()
+	frame()
+	if ui.state.Status != "Playback disabled in demo" {
+		t.Fatalf("expected 'Playback disabled in demo' status on music dock play click, got %q", ui.state.Status)
+	}
+	ui.search("hour")
+	frame()
+
 	// Assert zero network and exec calls were made across all spaces, chips, search, hero and card clicks
 	if netCalls := netCounter.count.Load(); netCalls != 0 {
 		t.Fatalf("demo mode made %d network calls, expected 0", netCalls)
 	}
 	if execCalls := execCounter.count.Load(); execCalls != 0 {
 		t.Fatalf("demo mode made %d exec calls, expected 0", execCalls)
+	}
+}
+
+// TestQueueIsolationPerSpace verifies that Watch, Shorts, Podcasts, and Music each maintain
+// their own independent queue and that modifying one queue never affects another.
+func TestQueueIsolationPerSpace(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.NewDeferred(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ui := New(Options{Store: st, Demo: true})
+
+	// 1. Assign queue to Watch space
+	ui.switchSpace(SpaceWatch)
+	ui.spaces.Active().Queue = []yt.Video{
+		{ID: "w1", Title: "Watch 1"},
+		{ID: "w2", Title: "Watch 2"},
+	}
+
+	// 2. Assign queue to Shorts space
+	ui.switchSpace(SpaceShorts)
+	ui.spaces.Active().Queue = []yt.Video{
+		{ID: "s1", Title: "Short 1"},
+	}
+
+	// 3. Assign queue to Podcasts space
+	ui.switchSpace(SpacePodcasts)
+	ui.spaces.Active().Queue = []yt.Video{
+		{ID: "p1", Title: "Podcast Ep 1"},
+		{ID: "p2", Title: "Podcast Ep 2"},
+		{ID: "p3", Title: "Podcast Ep 3"},
+	}
+
+	// 4. Assign queue to Music space
+	ui.switchSpace(SpaceMusic)
+	ui.spaces.Active().Queue = []yt.Video{
+		{ID: "m1", Title: "Track 1"},
+		{ID: "m2", Title: "Track 2"},
+	}
+
+	// Verify all queues are isolated
+	if len(ui.spaces.State(SpaceWatch).Queue) != 2 || ui.spaces.State(SpaceWatch).Queue[0].ID != "w1" {
+		t.Errorf("Watch queue mismatch: %v", ui.spaces.State(SpaceWatch).Queue)
+	}
+	if len(ui.spaces.State(SpaceShorts).Queue) != 1 || ui.spaces.State(SpaceShorts).Queue[0].ID != "s1" {
+		t.Errorf("Shorts queue mismatch: %v", ui.spaces.State(SpaceShorts).Queue)
+	}
+	if len(ui.spaces.State(SpacePodcasts).Queue) != 3 || ui.spaces.State(SpacePodcasts).Queue[2].ID != "p3" {
+		t.Errorf("Podcasts queue mismatch: %v", ui.spaces.State(SpacePodcasts).Queue)
+	}
+	if len(ui.spaces.State(SpaceMusic).Queue) != 2 || ui.spaces.State(SpaceMusic).Queue[1].ID != "m2" {
+		t.Errorf("Music queue mismatch: %v", ui.spaces.State(SpaceMusic).Queue)
+	}
+
+	// Mutate Music queue, verify others unchanged
+	ui.spaces.State(SpaceMusic).Queue = nil
+	if len(ui.spaces.State(SpaceWatch).Queue) != 2 {
+		t.Errorf("Watch queue was modified when Music queue cleared")
+	}
+	if len(ui.spaces.State(SpacePodcasts).Queue) != 3 {
+		t.Errorf("Podcasts queue was modified when Music queue cleared")
+	}
+}
+
+// TestRestoringSpaceQueryAfterAllYouTubeSearch verifies that searching via "All YouTube"
+// switches to Watch space and that returning to the original space restores its own query, chip, and state.
+func TestRestoringSpaceQueryAfterAllYouTubeSearch(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.NewDeferred(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ui := New(Options{Store: st, Demo: true})
+
+	var r input.Router
+	var ops op.Ops
+	frame := func() {
+		ops.Reset()
+		gtx := layout.Context{
+			Ops:         &ops,
+			Source:      r.Source(),
+			Constraints: layout.Exact(image.Pt(1440, 1080)),
+			Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
+			Now:         time.Now(),
+		}
+		ui.layout(gtx)
+		r.Frame(&ops)
+	}
+
+	// Start in Shorts space
+	ui.switchSpace(SpaceShorts)
+	ui.spaces.Active().Chip = 1
+	ui.searchEditor.SetText("crafts")
+	ui.lastSearchText = "crafts"
+	ui.suggestItems = []string{"crafts diy"}
+	ui.suggestVisible = true
+	frame()
+
+	// Simulate All YouTube click
+	ui.allYouTubeClick.Click()
+	frame()
+
+	// Verify UI switched to Watch space and search was executed
+	if ui.spaces.ActiveSpace != SpaceWatch {
+		t.Fatalf("expected active space Watch after All YouTube search, got %v", ui.spaces.ActiveSpace)
+	}
+	if ui.searchEditor.Text() != "crafts" {
+		t.Fatalf("expected search editor 'crafts' in Watch space, got %q", ui.searchEditor.Text())
+	}
+
+	// Switch back to Shorts space
+	ui.switchSpace(SpaceShorts)
+	frame()
+
+	// Verify Shorts space query and chip are restored
+	if ui.spaces.ActiveSpace != SpaceShorts {
+		t.Fatalf("expected active space Shorts, got %v", ui.spaces.ActiveSpace)
+	}
+	if ui.spaces.Active().Chip != 1 {
+		t.Fatalf("expected Shorts chip 1 restored, got %d", ui.spaces.Active().Chip)
+	}
+	if ui.searchEditor.Text() != "crafts" {
+		t.Fatalf("expected Shorts query 'crafts' restored, got %q", ui.searchEditor.Text())
 	}
 }
 
@@ -480,4 +678,611 @@ func TestDemoNewNeverOpensLiveStore(t *testing.T) {
 	if err != nil || string(data) != `{"active_account":"live_user"}` {
 		t.Fatalf("canary file in live store dir was modified or corrupted: %v", err)
 	}
+}
+
+func TestDrawCoverImageHelper(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.NewDeferred(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ui := New(Options{Store: st})
+
+	var ops op.Ops
+	gtx := layout.Context{
+		Ops:         &ops,
+		Constraints: layout.Exact(image.Pt(1000, 1000)),
+		Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
+		Now:         time.Now(),
+	}
+
+	inputs := []struct {
+		name string
+		img  image.Image
+	}{
+		{"wide_200x100", image.NewRGBA(image.Rect(0, 0, 200, 100))},
+		{"tall_100x200", image.NewRGBA(image.Rect(0, 0, 100, 200))},
+		{"square_150x150", image.NewRGBA(image.Rect(0, 0, 150, 150))},
+		{"nil_image", nil},
+	}
+
+	targets := []struct {
+		name string
+		pt   image.Point
+	}{
+		{"portrait_9_16", image.Pt(180, 320)},
+		{"landscape_16_9", image.Pt(320, 180)},
+		{"album_square", image.Pt(196, 196)},
+		{"track_square", image.Pt(44, 44)},
+	}
+
+	for _, in := range inputs {
+		for _, tgt := range targets {
+			dims := ui.drawCoverImage(gtx, in.img, tgt.pt, unit.Dp(4))
+			if dims.Size != tgt.pt {
+				t.Errorf("drawCoverImage(%s, %s): expected size %v, got %v", in.name, tgt.name, tgt.pt, dims.Size)
+			}
+		}
+	}
+}
+
+type fakeEmbedRecorder struct {
+	rects   []image.Rectangle
+	scales  []int
+	hidden  []bool
+	paused  bool
+	stopped bool
+	plays   []embed.PlayOptions
+}
+
+func (f *fakeEmbedRecorder) Play(opts embed.PlayOptions) error {
+	f.plays = append(f.plays, opts)
+	return nil
+}
+func (f *fakeEmbedRecorder) Stop() { f.stopped = true }
+func (f *fakeEmbedRecorder) SetRect(rect image.Rectangle, scale int) {
+	f.rects = append(f.rects, rect)
+	f.scales = append(f.scales, scale)
+}
+func (f *fakeEmbedRecorder) SetHidden(hidden bool)               { f.hidden = append(f.hidden, hidden) }
+func (f *fakeEmbedRecorder) TogglePause()                        { f.paused = !f.paused }
+func (f *fakeEmbedRecorder) SetPause(p bool)                     { f.paused = p }
+func (f *fakeEmbedRecorder) Seek(seconds float64, relative bool) {}
+func (f *fakeEmbedRecorder) SetVolume(volume float64)            {}
+func (f *fakeEmbedRecorder) ToggleMute()                         {}
+func (f *fakeEmbedRecorder) Status() embed.Status                { return embed.Status{} }
+func (f *fakeEmbedRecorder) Close()                              {}
+
+func TestEmbedPlayerVideoBoxPlacement(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.NewDeferred(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ui := New(Options{Store: st})
+	recorder := &fakeEmbedRecorder{}
+	ui.embedPlayer = recorder
+	ui.currentScale = 1
+
+	var r input.Router
+	var ops op.Ops
+	frame := func() {
+		ops.Reset()
+		gtx := layout.Context{
+			Ops:         &ops,
+			Source:      r.Source(),
+			Constraints: layout.Exact(image.Pt(1200, 760)),
+			Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
+			Now:         time.Now(),
+		}
+		ui.layout(gtx)
+		r.Frame(&ops)
+	}
+
+	// 1. Shorts Space (chip 0: Following - portrait stage has player)
+	ui.switchSpace(SpaceShorts)
+	ui.spaces.State(SpaceShorts).Chip = 0
+	ui.spaces.State(SpaceShorts).Shorts = []yt.Video{{ID: "s1", Title: "Test Short 1"}}
+	ui.spaces.State(SpaceShorts).ResumeItem = &ui.spaces.State(SpaceShorts).Shorts[0]
+	frame()
+	if len(recorder.rects) == 0 {
+		t.Fatal("expected SetRect call on Shorts space")
+	}
+	shortsRect := recorder.rects[len(recorder.rects)-1]
+	if shortsRect.Empty() {
+		t.Fatalf("expected non-empty Shorts stage video rect, got %v", shortsRect)
+	}
+	if recorder.hidden[len(recorder.hidden)-1] {
+		t.Fatalf("expected Shorts video box to not be hidden")
+	}
+
+	// 2. Switch to Explore chip on Shorts (unsupported card, no video box)
+	ui.spaces.State(SpaceShorts).Chip = 2 // Explore chip
+	frame()
+	lastRect := recorder.rects[len(recorder.rects)-1]
+	if !lastRect.Empty() {
+		t.Fatalf("expected empty rect for Explore chip without player, got %v", lastRect)
+	}
+	if !recorder.hidden[len(recorder.hidden)-1] {
+		t.Fatalf("expected hidden=true for page without player")
+	}
+
+	// 3. Podcasts Space (dock shows thumbnail when nothing plays; active video box when playing)
+	ui.switchSpace(SpacePodcasts)
+	frame()
+	idlePodcastsRect := recorder.rects[len(recorder.rects)-1]
+	if !idlePodcastsRect.Empty() {
+		t.Fatalf("expected empty rect when nothing playing in Podcasts dock, got %v", idlePodcastsRect)
+	}
+
+	podEp := yt.Video{ID: "ep1", Title: "Podcast Ep 1"}
+	ui.spaces.State(SpacePodcasts).ResumeItem = &podEp
+	frame()
+	podcastsRect := recorder.rects[len(recorder.rects)-1]
+	if podcastsRect.Empty() {
+		t.Fatalf("expected non-empty Podcasts dock video rect when playing, got %v", podcastsRect)
+	}
+	if recorder.hidden[len(recorder.hidden)-1] {
+		t.Fatalf("expected Podcasts video box to not be hidden when playing")
+	}
+
+	// 4. Music Space (dock shows thumbnail when nothing plays; active video box when playing)
+	ui.switchSpace(SpaceMusic)
+	frame()
+	idleMusicRect := recorder.rects[len(recorder.rects)-1]
+	if !idleMusicRect.Empty() {
+		t.Fatalf("expected empty rect when nothing playing in Music compact player, got %v", idleMusicRect)
+	}
+
+	musicTrack := yt.Video{ID: "m1", Title: "Music Track 1"}
+	ui.spaces.State(SpaceMusic).ResumeItem = &musicTrack
+	frame()
+	musicRect := recorder.rects[len(recorder.rects)-1]
+	if musicRect.Empty() {
+		t.Fatalf("expected non-empty Music compact player video rect when playing, got %v", musicRect)
+	}
+	if recorder.hidden[len(recorder.hidden)-1] {
+		t.Fatalf("expected Music video box to not be hidden when playing")
+	}
+
+	// 5. Switch to a page without a player (e.g. Subscriptions management)
+	ui.switchTab(TabSubscriptions)
+	frame()
+	pageWithoutPlayerRect := recorder.rects[len(recorder.rects)-1]
+	if !pageWithoutPlayerRect.Empty() {
+		t.Fatalf("expected empty rect after switching to Subscriptions tab, got %v", pageWithoutPlayerRect)
+	}
+	if !recorder.hidden[len(recorder.hidden)-1] {
+		t.Fatalf("expected hidden=true after switching to Subscriptions tab")
+	}
+	if !recorder.paused {
+		t.Fatalf("expected playback paused after switching to page without player")
+	}
+}
+
+func TestDebugPlayFirstUsesSpaceSelectionHandlers(t *testing.T) {
+	for _, tc := range []struct {
+		space SpaceID
+		item  yt.Video
+	}{
+		{SpaceShorts, yt.Video{ID: "short-live", Title: "Live short"}},
+		{SpacePodcasts, yt.Video{ID: "episode-live", Title: "Live episode"}},
+		{SpaceMusic, yt.Video{ID: "track-live", Title: "Live track"}},
+	} {
+		t.Run(fmt.Sprint(tc.space), func(t *testing.T) {
+			st, err := store.NewDeferred(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			ui := New(Options{Store: st})
+			ui.embedPlayer = &fakeEmbedRecorder{}
+			ui.debugPlayFirst = true
+			ui.firstFramePresented = true
+			ui.switchSpace(tc.space)
+			switch tc.space {
+			case SpaceShorts:
+				ui.spaces.State(tc.space).Shorts = []yt.Video{tc.item}
+			case SpacePodcasts:
+				ui.spaces.State(tc.space).Episodes = []yt.Video{tc.item}
+			case SpaceMusic:
+				ui.spaces.State(tc.space).Tracks = []yt.Video{tc.item}
+			}
+
+			ui.maybeTriggerDebugPlayFirst()
+			ui.drainActions()
+
+			state := ui.spaces.State(tc.space)
+			if state.ResumeItem == nil || state.ResumeItem.ID != tc.item.ID {
+				t.Fatalf("first item was not selected: resume=%+v", state.ResumeItem)
+			}
+			if len(state.Queue) != 1 || state.Queue[0].ID != tc.item.ID {
+				t.Fatalf("first item queue was not selected: queue=%+v", state.Queue)
+			}
+			if got := len(ui.embedPlayer.(*fakeEmbedRecorder).plays); got != 1 {
+				t.Fatalf("player Play calls = %d, want 1", got)
+			}
+		})
+	}
+}
+
+func TestNoDemoStringsInLiveMode(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.NewDeferred(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	demoData := LoadDemoData()
+	demoStrings := map[string]bool{
+		"MADE FOR THE LATE HOURS":                     true,
+		"SAMPLE COLLECTION":                           true,
+		"MADE FOR THE LATE HOURS · SAMPLE COLLECTION": true,
+		"LIKED\nMUSIC":                                true,
+		"MUSIC":                                       true,
+		"Field Notes · Sample short":                  true,
+		"A minute away from everything":               true,
+		"The full story behind the frame":             true,
+		"Sample short":                                true,
+		"Short 1 of 1":                                true,
+		"Provenance verified":                         true,
+		"Shorts feed · Provenance verified":           true,
+		"Sample short video preview":                  true,
+		demoData.Album.Title:                          true,
+		demoData.Album.Artist:                         true,
+		demoData.Album.Description:                    true,
+		demoData.Hero.Title:                           true,
+		demoData.DockTrack.Title:                      true,
+	}
+	for _, trk := range demoData.Tracks {
+		demoStrings[trk.Title] = true
+	}
+	for _, show := range demoData.Shows {
+		demoStrings[show.Title] = true
+	}
+	for _, ep := range demoData.Episodes {
+		demoStrings[ep.Title] = true
+	}
+	for _, sh := range demoData.Shorts {
+		demoStrings[sh.Title] = true
+	}
+
+	ui := New(Options{
+		Demo:  false, // Live mode!
+		Store: st,
+	})
+
+	// Populate live fixture items with distinct non-demo names
+	ui.spaces.State(SpaceWatch).Videos = []yt.Video{
+		{ID: "live_w1", Title: "Live Video 101", Channel: "Live Tech Channel"},
+	}
+	ui.spaces.State(SpaceShorts).Shorts = []yt.Video{
+		{ID: "live_s1", Title: "Live Short 202", Channel: "Live Short Channel", URL: "https://www.youtube.com/shorts/live_s1"},
+	}
+	ui.spaces.State(SpacePodcasts).Shows = []yt.PodcastShow{
+		{ID: "live_p1", Title: "Live Show 303", Channel: "Live Podcast Creator"},
+	}
+	ui.spaces.State(SpacePodcasts).Episodes = []yt.Video{
+		{ID: "live_pe1", Title: "Live Episode 404", Channel: "Live Podcast Creator", Duration: 1200},
+	}
+	ui.spaces.State(SpaceMusic).Tracks = []yt.Video{
+		{ID: "live_m1", Title: "Live Track 505", Channel: "Live Music Artist", Duration: 240},
+	}
+
+	var recordedStrings []string
+	ui.labelHook = func(s string) {
+		recordedStrings = append(recordedStrings, s)
+	}
+
+	var r input.Router
+	var ops op.Ops
+	frame := func() {
+		ops.Reset()
+		gtx := layout.Context{
+			Ops:         &ops,
+			Source:      r.Source(),
+			Constraints: layout.Exact(image.Pt(1200, 760)),
+			Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
+			Now:         time.Now(),
+		}
+		ui.layout(gtx)
+		r.Frame(&ops)
+	}
+
+	// Layout every space and every chip in live mode
+	for _, spaceID := range []SpaceID{SpaceWatch, SpaceShorts, SpacePodcasts, SpaceMusic} {
+		ui.switchSpace(spaceID)
+		cfg := GetSpaceConfig(spaceID)
+		numChips := len(cfg.Chips)
+		if numChips == 0 {
+			numChips = 1
+		}
+		for c := 0; c < numChips; c++ {
+			ui.spaces.Active().Chip = c
+			frame()
+		}
+	}
+
+	// Verify no demo string appears anywhere in rendered label strings
+	for _, s := range recordedStrings {
+		trimmed := strings.TrimSpace(s)
+		lower := strings.ToLower(trimmed)
+		for _, banned := range []string{"sample", "demo", "fictional", "provenance", "view full playlist"} {
+			if strings.Contains(lower, banned) {
+				t.Errorf("live mode label %q contains forbidden text %q", trimmed, banned)
+			}
+		}
+		if demoStrings[trimmed] {
+			t.Errorf("demo string %q appeared in live mode layout", trimmed)
+		}
+		for demoStr := range demoStrings {
+			if strings.Contains(trimmed, demoStr) && len(demoStr) > 4 {
+				t.Errorf("demo substring %q found in live mode label string %q", demoStr, trimmed)
+			}
+		}
+	}
+}
+
+func TestVideoMarkerPixelExactPlacement(t *testing.T) {
+	sizesDP := []image.Point{
+		{1440, 1080},
+		{1200, 760},
+		{1000, 800},
+		{1051, 800}, {1049, 800},
+		{601, 800}, {599, 800},
+	}
+
+	type spaceTestCase struct {
+		name      string
+		setup     func(ui *UI)
+		isPlayer  bool
+		isExplore bool
+	}
+
+	for _, scale := range []int{1, 2} {
+		for _, sizeDP := range sizesDP {
+			sz := image.Pt(sizeDP.X*scale, sizeDP.Y*scale)
+			w, err := headless.NewWindow(sz.X, sz.Y)
+			if err != nil {
+				t.Fatalf("initializing headless window (%dx%d): %v", sz.X, sz.Y, err)
+			}
+
+			testCases := []spaceTestCase{
+				{
+					name: "Shorts",
+					setup: func(ui *UI) {
+						ui.switchSpace(SpaceShorts)
+						ui.spaces.State(SpaceShorts).Chip = 0
+						ui.spaces.State(SpaceShorts).Shorts = []yt.Video{
+							{ID: "s1", Title: "Short One", URL: "https://www.youtube.com/shorts/s1"},
+						}
+						ui.spaces.State(SpaceShorts).ResumeItem = &ui.spaces.State(SpaceShorts).Shorts[0]
+						ui.watchPaused = false
+					},
+					isPlayer: true,
+				},
+				{
+					name: "Podcasts",
+					setup: func(ui *UI) {
+						ui.switchSpace(SpacePodcasts)
+						ui.spaces.State(SpacePodcasts).Chip = 0
+						ui.spaces.State(SpacePodcasts).Episodes = []yt.Video{
+							{ID: "ep1", Title: "Episode One", Channel: "Podcaster", Duration: 1800},
+						}
+						ui.spaces.State(SpacePodcasts).ResumeItem = &ui.spaces.State(SpacePodcasts).Episodes[0]
+						ui.watchPaused = false
+					},
+					isPlayer: true,
+				},
+				{
+					name: "Music",
+					setup: func(ui *UI) {
+						ui.switchSpace(SpaceMusic)
+						ui.spaces.State(SpaceMusic).Chip = 0
+						ui.spaces.State(SpaceMusic).Tracks = []yt.Video{
+							{ID: "m1", Title: "Track One", Channel: "Artist", Duration: 240},
+						}
+						ui.spaces.State(SpaceMusic).ResumeItem = &ui.spaces.State(SpaceMusic).Tracks[0]
+						ui.watchPaused = false
+					},
+					isPlayer: true,
+				},
+				{
+					name: "Watch",
+					setup: func(ui *UI) {
+						ui.openWatchPage(yt.Video{ID: "w1", Title: "Watch One", Duration: 600})
+						ui.watchPaused = false
+					},
+					isPlayer: true,
+				},
+			}
+
+			for _, tc := range testCases {
+				dir := t.TempDir()
+				st, err := store.NewDeferred(dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				ui := New(Options{
+					Store:            st,
+					DebugVideoMarker: true,
+				})
+				recorder := &fakeEmbedRecorder{}
+				ui.embedPlayer = recorder
+				ui.currentScale = scale
+
+				tc.setup(ui)
+
+				var ops op.Ops
+				gtx := layout.Context{
+					Ops:         &ops,
+					Metric:      unit.Metric{PxPerDp: float32(scale), PxPerSp: float32(scale)},
+					Constraints: layout.Exact(sz),
+					Now:         time.Now(),
+				}
+				ui.layout(gtx)
+				if err := w.Frame(&ops); err != nil {
+					t.Fatalf("%s (%dx%d) frame error: %v", tc.name, sz.X, sz.Y, err)
+				}
+
+				// Capture screenshot and locate marker color #00FF01
+				img := image.NewRGBA(image.Rect(0, 0, sz.X, sz.Y))
+				if err := w.Screenshot(img); err != nil {
+					t.Fatalf("%s (%dx%d) screenshot error: %v", tc.name, sz.X, sz.Y, err)
+				}
+
+				minX, minY, maxX, maxY := -1, -1, -1, -1
+				for y := 0; y < sz.Y; y++ {
+					for x := 0; x < sz.X; x++ {
+						c := img.RGBAAt(x, y)
+						if c.R == 0 && c.G == 255 && c.B == 1 && c.A == 255 {
+							if minX == -1 || x < minX {
+								minX = x
+							}
+							if maxX == -1 || x > maxX {
+								maxX = x
+							}
+							if minY == -1 || y < minY {
+								minY = y
+							}
+							if maxY == -1 || y > maxY {
+								maxY = y
+							}
+						}
+					}
+				}
+
+				if minX == -1 {
+					t.Fatalf("%s (%dx%d): marker #00FF01 not found in rendered frame (spaceOrigin=%v, reg=%v)", tc.name, sz.X, sz.Y, ui.spaceOrigin, recorder.rects)
+				}
+
+				drawnRect := image.Rect(minX, minY, maxX+1, maxY+1)
+				if len(recorder.rects) == 0 {
+					t.Fatalf("%s (%dx%d): no rect registered with fake embed player", tc.name, sz.X, sz.Y)
+				}
+				registeredRect := recorder.rects[len(recorder.rects)-1]
+				t.Logf("%s (%dx%d): drawn=%v registered=%v spaceOrigin=%v", tc.name, sz.X, sz.Y, drawnRect, registeredRect, ui.spaceOrigin)
+
+				diffX := abs(drawnRect.Min.X - registeredRect.Min.X)
+				diffY := abs(drawnRect.Min.Y - registeredRect.Min.Y)
+				diffW := abs(drawnRect.Dx() - registeredRect.Dx())
+				diffH := abs(drawnRect.Dy() - registeredRect.Dy())
+
+				if diffX > 1 || diffY > 1 || diffW > 1 || diffH > 1 {
+					t.Errorf("%s (%dx%d): drawn marker rect %v does not equal registered rect %v (±1px)",
+						tc.name, sz.X, sz.Y, drawnRect, registeredRect)
+				}
+			}
+
+			w.Release()
+		}
+	}
+
+	// Assert rect is empty after switching to a space or chip without a player
+	dir := t.TempDir()
+	st, err := store.NewDeferred(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ui := New(Options{Store: st, DebugVideoMarker: true})
+	recorder := &fakeEmbedRecorder{}
+	ui.embedPlayer = recorder
+	ui.currentScale = 1
+
+	var ops op.Ops
+	frame := func() {
+		ops.Reset()
+		gtx := layout.Context{
+			Ops:         &ops,
+			Constraints: layout.Exact(image.Pt(1200, 760)),
+			Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
+			Now:         time.Now(),
+		}
+		ui.layout(gtx)
+	}
+
+	// 1. Shorts with active player
+	ui.switchSpace(SpaceShorts)
+	ui.spaces.State(SpaceShorts).Chip = 0
+	ui.spaces.State(SpaceShorts).Shorts = []yt.Video{{ID: "s1", Title: "Short 1"}}
+	ui.spaces.State(SpaceShorts).ResumeItem = &ui.spaces.State(SpaceShorts).Shorts[0]
+	frame()
+	if recorder.rects[len(recorder.rects)-1].Empty() {
+		t.Fatal("expected non-empty rect for active Shorts player")
+	}
+
+	// 2. Switch to Explore chip without player (unsupported in live mode)
+	ui.spaces.State(SpaceShorts).Chip = 2
+	frame()
+	if !recorder.rects[len(recorder.rects)-1].Empty() {
+		t.Errorf("expected empty rect for Explore chip without player, got %v", recorder.rects[len(recorder.rects)-1])
+	}
+	if !recorder.hidden[len(recorder.hidden)-1] {
+		t.Error("expected hidden=true for Explore chip")
+	}
+
+	// 3. Switch to Subscriptions tab without player
+	ui.switchTab(TabSubscriptions)
+	frame()
+	if !recorder.rects[len(recorder.rects)-1].Empty() {
+		t.Errorf("expected empty rect after switching to Subscriptions tab, got %v", recorder.rects[len(recorder.rects)-1])
+	}
+	if !recorder.hidden[len(recorder.hidden)-1] {
+		t.Error("expected hidden=true for Subscriptions tab")
+	}
+
+	// 4. Scroll video out of view on Watch page
+	ui.openWatchPage(yt.Video{ID: "w1", Title: "Watch 1", Duration: 600})
+	// In narrow window mode (< 1000dp), watchList scrolls
+	partialWindow, err := headless.NewWindow(599, 800)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gtxNarrow := layout.Context{
+		Ops:         &ops,
+		Constraints: layout.Exact(image.Pt(599, 800)),
+		Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
+		Now:         time.Now(),
+	}
+	ui.watchList.Position.First = 0
+	ui.watchList.Position.Offset = 40
+	ops.Reset()
+	ui.layout(gtxNarrow)
+	if !recorder.rects[len(recorder.rects)-1].Empty() {
+		t.Errorf("expected empty rect when scroll clips video, got %v", recorder.rects[len(recorder.rects)-1])
+	}
+	if err := partialWindow.Frame(&ops); err != nil {
+		t.Fatal(err)
+	}
+	partialImage := image.NewRGBA(image.Rect(0, 0, 599, 800))
+	if err := partialWindow.Screenshot(partialImage); err != nil {
+		t.Fatal(err)
+	}
+	for y := 0; y < partialImage.Bounds().Dy(); y++ {
+		for x := 0; x < partialImage.Bounds().Dx(); x++ {
+			c := partialImage.RGBAAt(x, y)
+			if c.R == 0 && c.G == 255 && c.B == 1 && c.A == 255 {
+				t.Fatalf("video marker remains visible after partial scroll at (%d,%d)", x, y)
+			}
+		}
+	}
+	partialWindow.Release()
+
+	ui.watchList.Position.First = 1
+	ui.watchList.Position.Offset = 1000
+	ops.Reset()
+	ui.layout(gtxNarrow)
+
+	if !recorder.rects[len(recorder.rects)-1].Empty() {
+		t.Errorf("expected empty rect after scrolling video out of view, got %v", recorder.rects[len(recorder.rects)-1])
+	}
+	if !recorder.hidden[len(recorder.hidden)-1] {
+		t.Error("expected hidden=true after scrolling video out of view")
+	}
+}
+
+func abs(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
 }

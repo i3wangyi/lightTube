@@ -583,3 +583,84 @@ func drawLibraryIcon(gtx layout.Context, bounds image.Rectangle, col color.NRGBA
 	bm.Close()
 	paint.FillShape(gtx.Ops, col, clip.Stroke{Path: bm.End(), Width: strokeW}.Op())
 }
+
+// drawPlayIcon draws a centered vector play triangle.
+func drawPlayIcon(gtx layout.Context, bounds image.Rectangle, col color.NRGBA) {
+	drawPlayTriangle(gtx, bounds, col)
+}
+
+// drawPauseIcon draws two vertical vector pause bars.
+func drawPauseIcon(gtx layout.Context, bounds image.Rectangle, col color.NRGBA) {
+	cx := float32(bounds.Min.X + bounds.Dx()/2)
+	cy := float32(bounds.Min.Y + bounds.Dy()/2)
+	barW := float32(gtx.Dp(3))
+	barH := float32(gtx.Dp(10))
+	gap := float32(gtx.Dp(2.5))
+
+	r1 := image.Rect(int(cx-gap-barW), int(cy-barH/2), int(cx-gap), int(cy+barH/2))
+	r2 := image.Rect(int(cx+gap), int(cy-barH/2), int(cx+gap+barW), int(cy+barH/2))
+	paint.FillShape(gtx.Ops, col, clip.UniformRRect(r1, gtx.Dp(1)).Op(gtx.Ops))
+	paint.FillShape(gtx.Ops, col, clip.UniformRRect(r2, gtx.Dp(1)).Op(gtx.Ops))
+}
+
+// drawNextIcon draws a vector skip next icon.
+func drawNextIcon(gtx layout.Context, bounds image.Rectangle, col color.NRGBA) {
+	drawSkipNextIcon(gtx, bounds, col)
+}
+
+// drawPrevIcon draws a vector skip previous icon.
+func drawPrevIcon(gtx layout.Context, bounds image.Rectangle, col color.NRGBA) {
+	drawSkipPrevIcon(gtx, bounds, col)
+}
+
+// drawUpArrowIcon draws a vector up arrow.
+func drawUpArrowIcon(gtx layout.Context, bounds image.Rectangle, col color.NRGBA) {
+	cx := float32(bounds.Min.X + bounds.Dx()/2)
+	cy := float32(bounds.Min.Y + bounds.Dy()/2)
+	scale := float32(bounds.Dx()) / 24.0
+	strokeW := 2.0 * scale
+
+	var p clip.Path
+	p.Begin(gtx.Ops)
+	p.MoveTo(f32.Pt(cx-5*scale, cy+2*scale))
+	p.LineTo(f32.Pt(cx, cy-4*scale))
+	p.LineTo(f32.Pt(cx+5*scale, cy+2*scale))
+	paint.FillShape(gtx.Ops, col, clip.Stroke{Path: p.End(), Width: strokeW}.Op())
+}
+
+// drawDownArrowIcon draws a vector down arrow.
+func drawDownArrowIcon(gtx layout.Context, bounds image.Rectangle, col color.NRGBA) {
+	cx := float32(bounds.Min.X + bounds.Dx()/2)
+	cy := float32(bounds.Min.Y + bounds.Dy()/2)
+	scale := float32(bounds.Dx()) / 24.0
+	strokeW := 2.0 * scale
+
+	var p clip.Path
+	p.Begin(gtx.Ops)
+	p.MoveTo(f32.Pt(cx-5*scale, cy-2*scale))
+	p.LineTo(f32.Pt(cx, cy+4*scale))
+	p.LineTo(f32.Pt(cx+5*scale, cy-2*scale))
+	paint.FillShape(gtx.Ops, col, clip.Stroke{Path: p.End(), Width: strokeW}.Op())
+}
+
+// drawStarIcon draws a 5-point vector star.
+func drawStarIcon(gtx layout.Context, bounds image.Rectangle, col color.NRGBA) {
+	cx := float32(bounds.Min.X + bounds.Dx()/2)
+	cy := float32(bounds.Min.Y + bounds.Dy()/2)
+	scale := float32(bounds.Dx()) / 24.0
+
+	var p clip.Path
+	p.Begin(gtx.Ops)
+	p.MoveTo(f32.Pt(cx, cy-6*scale))
+	p.LineTo(f32.Pt(cx+1.8*scale, cy-2*scale))
+	p.LineTo(f32.Pt(cx+6*scale, cy-1.8*scale))
+	p.LineTo(f32.Pt(cx+3*scale, cy+1.5*scale))
+	p.LineTo(f32.Pt(cx+4*scale, cy+6*scale))
+	p.LineTo(f32.Pt(cx, cy+3.5*scale))
+	p.LineTo(f32.Pt(cx-4*scale, cy+6*scale))
+	p.LineTo(f32.Pt(cx-3*scale, cy+1.5*scale))
+	p.LineTo(f32.Pt(cx-6*scale, cy-1.8*scale))
+	p.LineTo(f32.Pt(cx-1.8*scale, cy-2*scale))
+	p.Close()
+	paint.FillShape(gtx.Ops, col, clip.Outline{Path: p.End()}.Op())
+}

@@ -304,8 +304,15 @@ func (ui *UI) switchSpace(space SpaceID) {
 	if target != nil {
 		ui.searchEditor.SetText(target.Query)
 		ui.lastSearchText = target.Query
-		if space == SpaceWatch {
+		switch space {
+		case SpaceWatch:
 			ui.loadWatchSpaceContent(target.Chip)
+		case SpaceShorts:
+			ui.loadShortsSpaceContent(target.Chip)
+		case SpacePodcasts:
+			ui.loadPodcastsSpaceContent(target.Chip)
+		case SpaceMusic:
+			ui.loadMusicSpaceContent(target.Chip)
 		}
 	}
 
@@ -502,8 +509,15 @@ func (ui *UI) layoutChips(gtx layout.Context) layout.Dimensions {
 			click := &ui.spaces.ChipClicks[idx]
 			if click.Clicked(gtx) {
 				ui.spaces.Active().Chip = idx
-				if ui.spaces.ActiveSpace == SpaceWatch {
+				switch ui.spaces.ActiveSpace {
+				case SpaceWatch:
 					ui.loadWatchSpaceContent(idx)
+				case SpaceShorts:
+					ui.loadShortsSpaceContent(idx)
+				case SpacePodcasts:
+					ui.loadPodcastsSpaceContent(idx)
+				case SpaceMusic:
+					ui.loadMusicSpaceContent(idx)
 				}
 				ui.invalidate()
 			}

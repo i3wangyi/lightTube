@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -78,6 +79,10 @@ type Options struct {
 	DebugChip          int
 	AmbientOff         bool
 	DebugWatch         bool
+	DebugSpace         string
+	DebugVideoMarker   bool
+	DebugPlayFirst     bool
+	DebugSeekSeconds   int
 }
 
 // UI manages the Gio window, layout, and event interactions.
@@ -96,27 +101,36 @@ type UI struct {
 	power player.Power
 	mode  player.Mode
 
-	debug            bool
-	startTime        time.Time
-	initialSearch    string
-	firstFrameLogged bool
-	dataLoaded       bool
+	debug               bool
+	startTime           time.Time
+	initialSearch       string
+	firstFrameLogged    bool
+	firstFramePresented bool
+	dataLoaded          bool
 
 	// Options & flags
 	externalPlayer     bool
 	debugPlay          string
 	debugPlaySeconds   int
 	debugPlayTriggered bool
+	debugPlayFirst     bool
+	debugSeekSeconds   int
+	debugVideoMarker   bool
+	spaceOrigin        image.Point
+	spaceSize          image.Point
+	lastLoggedVideoBox image.Rectangle
 	debugHeap          string
 	heapWritten        bool
 
 	// Embedded player & platform view
-	view         platformView
-	embedPlayer  *embed.Player
-	currentScale int
-	hwdecLogged  bool
-	lastTimePoll time.Time
-	previousTab  Tab
+	view            platformView
+	embedPlayer     EmbedPlayerController
+	activeVideoBox  image.Rectangle
+	videoBoxLaidOut bool
+	currentScale    int
+	hwdecLogged     bool
+	lastTimePoll    time.Time
+	previousTab     Tab
 
 	// Watch page state & controls
 	watchVideo            yt.Video
@@ -180,6 +194,11 @@ type UI struct {
 	playlistBackBtn  widget.Clickable
 	debugPlaylist    bool
 
+	// Phase 10b: Spaces Loading
+	shortsLoading   bool
+	podcastsLoading bool
+	musicLoading    bool
+
 	// Phase 9: Multi-Account
 	accountSwitchClicks  map[string]*widget.Clickable
 	accountSignOutClicks map[string]*widget.Clickable
@@ -189,6 +208,9 @@ type UI struct {
 	accountSignOutBtn    widget.Clickable
 	showAddAccount       bool
 	discoveredProfiles   []yt.BrowserProfile
+
+	// Test hooks
+	labelHook            func(string)
 	addProfileClicks     []widget.Clickable
 	signInGoogleBtn      widget.Clickable
 	signInGoogleStatus   string
@@ -379,6 +401,9 @@ func New(opts Options) *UI {
 		hoverCardIdx:         -1,
 		debugHeap:            opts.DebugHeap,
 		debugPlaylist:        opts.DebugPlaylist,
+		debugVideoMarker:     opts.DebugVideoMarker,
+		debugPlayFirst:       opts.DebugPlayFirst,
+		debugSeekSeconds:     opts.DebugSeekSeconds,
 		watchLastMouseMove:   time.Now(),
 		watchVolume:          100,
 		currentScale:         2,
@@ -467,6 +492,18 @@ func New(opts Options) *UI {
 	if opts.DebugPlaylist {
 		ui.state.CurrentTab = TabPlaylist
 		ui.loadSavedPlaylists()
+	}
+	if opts.DebugSpace != "" {
+		switch strings.ToLower(opts.DebugSpace) {
+		case "shorts":
+			ui.switchSpace(SpaceShorts)
+		case "podcasts":
+			ui.switchSpace(SpacePodcasts)
+		case "music":
+			ui.switchSpace(SpaceMusic)
+		case "watch":
+			ui.switchSpace(SpaceWatch)
+		}
 	}
 
 	ui.accountBrowserEditor.SingleLine = true
@@ -650,6 +687,9 @@ func (ui *UI) eventLoop() error {
 			}
 
 		case app.FrameEvent:
+			if ui.debug {
+				fmt.Fprintf(os.Stderr, "FRAME_EVENT: size=%v metric=%+v\n", e.Size, e.Metric)
+			}
 			ui.currentScale = int(e.Metric.PxPerDp)
 			if ui.currentScale <= 0 {
 				ui.currentScale = 2
@@ -690,10 +730,17 @@ func (ui *UI) eventLoop() error {
 			}
 
 			// Poll mpv status at most 4 times a second, and only while playing and window visible
-			if ui.state.CurrentTab == TabWatch && ui.embedPlayer != nil {
+			if ui.embedPlayer != nil && (!ui.watchPaused || ui.state.CurrentTab == TabWatch) {
 				if time.Since(ui.lastTimePoll) >= 250*time.Millisecond {
 					ui.lastTimePoll = time.Now()
 					st := ui.embedPlayer.Status()
+					if ui.debugSeekSeconds > 0 && st.Duration > 0 && st.TimePos > 0 && !st.Paused {
+						ui.embedPlayer.Seek(float64(ui.debugSeekSeconds), false)
+						if ui.debug {
+							fmt.Fprintf(os.Stderr, "debug-seek=%d\n", ui.debugSeekSeconds)
+						}
+						ui.debugSeekSeconds = 0
+					}
 					ui.watchCurrentTime = st.TimePos
 					if st.Duration > 0 {
 						ui.watchDuration = st.Duration
@@ -709,7 +756,11 @@ func (ui *UI) eventLoop() error {
 								time.Sleep(time.Duration(ui.debugPlaySeconds) * time.Second)
 								ui.writeHeapProfile()
 								ui.sendAction(func() {
-									ui.closeWatchPage()
+									if ui.state.CurrentTab == TabWatch {
+										ui.closeWatchPage()
+									} else {
+										ui.pausePlayback()
+									}
 								})
 								ui.invalidate()
 							}()
@@ -717,7 +768,7 @@ func (ui *UI) eventLoop() error {
 					}
 					if ui.debug && int(st.TimePos) > 0 && int(st.TimePos) != ui.lastLoggedSecond {
 						ui.lastLoggedSecond = int(st.TimePos)
-						fmt.Fprintf(os.Stderr, "playback-pos=%d\n", int(st.TimePos))
+						fmt.Fprintf(os.Stderr, "playback-pos=%d duration=%.1f paused=%t playing=%t hwdec=%s\n", int(st.TimePos), st.Duration, st.Paused, st.IsPlaying, st.HWDecCurrent)
 					}
 				}
 			}
@@ -727,7 +778,7 @@ func (ui *UI) eventLoop() error {
 			ui.layout(gtx)
 
 			// Invalidate for next timer tick when playing
-			if ui.state.CurrentTab == TabWatch && !ui.watchPaused {
+			if ui.embedPlayer != nil && !ui.watchPaused {
 				gtx.Execute(op.InvalidateCmd{At: gtx.Now.Add(250 * time.Millisecond)})
 			}
 			if ui.state.CurrentTab == TabWatch && ui.watchFullscreen && time.Since(ui.watchLastMouseMove) < 3*time.Second {
@@ -735,6 +786,7 @@ func (ui *UI) eventLoop() error {
 			}
 
 			e.Frame(gtx.Ops)
+			ui.firstFramePresented = true
 		}
 	}
 }
@@ -1252,6 +1304,22 @@ func (ui *UI) search(query string) {
 		return
 	}
 	ui.dropThumbnails()
+
+	// Scoped search per space
+	if ui.spaces != nil {
+		switch ui.spaces.ActiveSpace {
+		case SpaceShorts:
+			ui.searchShorts(query)
+			return
+		case SpacePodcasts:
+			ui.searchPodcasts(query)
+			return
+		case SpaceMusic:
+			ui.searchMusic(query)
+			return
+		}
+	}
+
 	ui.state.CurrentTab = TabSearch
 	ui.state.Status = fmt.Sprintf("Searching %q…", query)
 
@@ -1290,6 +1358,380 @@ func (ui *UI) search(query string) {
 		})
 		ui.invalidate()
 	}()
+}
+
+func (ui *UI) searchShorts(query string) {
+	ui.state.Status = "Searching Shorts…"
+	state := ui.spaces.State(SpaceShorts)
+
+	if ui.demo {
+		if ui.demoData != nil {
+			q := strings.ToLower(query)
+			var matched []yt.Video
+			for _, s := range ui.demoData.Shorts {
+				if strings.Contains(strings.ToLower(s.Title), q) || strings.Contains(strings.ToLower(s.Channel), q) {
+					matched = append(matched, yt.Video{
+						ID:          s.ID,
+						Title:       s.Title,
+						Channel:     s.Channel,
+						Description: s.Caption,
+						URL:         s.SourceLink,
+					})
+				}
+			}
+			state.Shorts = matched
+			ui.state.Status = ""
+		}
+		ui.invalidate()
+		return
+	}
+
+	gen := ui.currentGen()
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		searchURL := yt.ShortsSearchURL(query)
+		bin := "yt-dlp"
+		if ui.account != nil && ui.account.BinaryPath != "" {
+			bin = ui.account.BinaryPath
+		}
+		args := []string{"--flat-playlist", "-J", searchURL}
+		if ui.account != nil && ui.account.SignedIn() {
+			if cookieCopy, err := ui.account.PlaybackCookieFile(); err == nil {
+				args = append([]string{"--cookies", cookieCopy}, args...)
+			}
+		}
+
+		cmd := exec.CommandContext(ctx, bin, args...)
+		out, err := cmd.Output()
+		ui.sendAction(func() {
+			if gen != ui.currentGen() {
+				return
+			}
+			if err != nil {
+				ui.state.Status = "Shorts search error"
+				return
+			}
+			vids, pErr := yt.ParseShortsSearchJSON(out)
+			if pErr == nil {
+				state.Shorts = vids
+			}
+			ui.state.Status = ""
+		})
+		ui.invalidate()
+	}()
+}
+
+func (ui *UI) searchPodcasts(query string) {
+	ui.state.Status = fmt.Sprintf("Searching Podcasts for %q…", query)
+	state := ui.spaces.State(SpacePodcasts)
+
+	if ui.demo {
+		if ui.demoData != nil {
+			q := strings.ToLower(query)
+			var matchedShows []yt.PodcastShow
+			for _, s := range ui.demoData.Shows {
+				if strings.Contains(strings.ToLower(s.Title), q) || strings.Contains(strings.ToLower(s.Creator), q) {
+					matchedShows = append(matchedShows, yt.PodcastShow{
+						ID:      s.ID,
+						Title:   s.Title,
+						Channel: s.Creator,
+						Genre:   s.Genre,
+					})
+				}
+			}
+			state.Shows = matchedShows
+			var matchedEps []yt.Video
+			for _, e := range ui.demoData.Episodes {
+				if strings.Contains(strings.ToLower(e.Title), q) || strings.Contains(strings.ToLower(e.Show), q) {
+					matchedEps = append(matchedEps, yt.Video{
+						ID:          e.ID,
+						Title:       e.Title,
+						Channel:     e.Show + " · " + e.Number,
+						Duration:    e.Duration,
+						Description: e.ProgressText,
+					})
+				}
+			}
+			state.Episodes = matchedEps
+			ui.state.Status = ""
+		}
+		ui.invalidate()
+		return
+	}
+
+	gen := ui.currentGen()
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		podcastQuery := query + " podcast"
+		videos, err := ui.ytClient.Search(ctx, podcastQuery)
+		ui.sendAction(func() {
+			if gen != ui.currentGen() {
+				return
+			}
+			if err != nil {
+				ui.state.Status = "Podcasts search error: " + err.Error()
+				return
+			}
+			state.Episodes = videos
+			ui.state.Status = ""
+		})
+		ui.invalidate()
+	}()
+}
+
+func (ui *UI) searchMusic(query string) {
+	ui.state.Status = fmt.Sprintf("Searching Music for %q…", query)
+	state := ui.spaces.State(SpaceMusic)
+
+	if ui.demo {
+		if ui.demoData != nil {
+			q := strings.ToLower(query)
+			var matchedTracks []yt.Video
+			for _, t := range ui.demoData.Tracks {
+				if strings.Contains(strings.ToLower(t.Title), q) || strings.Contains(strings.ToLower(t.Artist), q) || strings.Contains(strings.ToLower(t.Album), q) {
+					matchedTracks = append(matchedTracks, yt.Video{
+						ID:          t.ID,
+						Title:       t.Title,
+						Channel:     t.Artist,
+						Duration:    t.Duration,
+						Description: t.Album,
+					})
+				}
+			}
+			state.Tracks = matchedTracks
+			ui.state.Status = ""
+		}
+		ui.invalidate()
+		return
+	}
+
+	if ui.account == nil {
+		return
+	}
+	gen := ui.currentGen()
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		album, tracks, err := ui.account.SearchMusic(ctx, query)
+		ui.sendAction(func() {
+			if gen != ui.currentGen() {
+				return
+			}
+			if err != nil {
+				ui.state.Status = "Music search error: " + err.Error()
+				return
+			}
+			if album != nil {
+				state.Album = album
+			}
+			state.Tracks = tracks
+			state.Queue = tracks
+			ui.state.Status = ""
+		})
+		ui.invalidate()
+	}()
+}
+
+func (ui *UI) loadShortsSpaceContent(chip int) {
+	state := ui.spaces.State(SpaceShorts)
+	if ui.demo && ui.demoData != nil {
+		switch chip {
+		case 0, 2:
+			var vids []yt.Video
+			for _, s := range ui.demoData.Shorts {
+				vids = append(vids, yt.Video{
+					ID:          s.ID,
+					Title:       s.Title,
+					Channel:     s.Channel,
+					Description: s.Caption,
+					URL:         s.SourceLink,
+				})
+			}
+			state.Shorts = vids
+		case 1:
+			var vids []yt.Video
+			for _, s := range ui.demoData.Shorts {
+				if ui.demoData.SavedTitles[s.Title] {
+					vids = append(vids, yt.Video{
+						ID:          s.ID,
+						Title:       s.Title,
+						Channel:     s.Channel,
+						Description: s.Caption,
+						URL:         s.SourceLink,
+					})
+				}
+			}
+			state.Shorts = vids
+		}
+		return
+	}
+
+	// Live mode: chips Following (0), Saved (1), Explore (2)
+	switch chip {
+	case 0: // Following
+		if ui.account != nil {
+			ui.shortsLoading = true
+			gen := ui.currentGen()
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+				defer cancel()
+				vids, err := ui.account.MergedShorts(ctx, 15)
+				ui.sendAction(func() {
+					ui.shortsLoading = false
+					if gen != ui.currentGen() {
+						return
+					}
+					if err == nil {
+						state.Shorts = vids
+					}
+				})
+				ui.invalidate()
+			}()
+		}
+	case 1: // Saved
+		if ui.store != nil {
+			wl := ui.store.WatchLater()
+			var vids []yt.Video
+			for _, v := range wl {
+				if yt.IsShort(v, "") {
+					vids = append(vids, v)
+				}
+			}
+			state.Shorts = vids
+		}
+	case 2: // Explore: explicit unsupported state
+		state.Shorts = nil
+	}
+}
+
+func (ui *UI) loadPodcastsSpaceContent(chip int) {
+	state := ui.spaces.State(SpacePodcasts)
+	if ui.demo && ui.demoData != nil {
+		var shows []yt.PodcastShow
+		for _, s := range ui.demoData.Shows {
+			shows = append(shows, yt.PodcastShow{
+				ID:      s.ID,
+				Title:   s.Title,
+				Channel: s.Creator,
+				Genre:   s.Genre,
+			})
+		}
+		state.Shows = shows
+		var eps []yt.Video
+		for _, e := range ui.demoData.Episodes {
+			eps = append(eps, yt.Video{
+				ID:          e.ID,
+				Title:       e.Title,
+				Channel:     e.Show + " · " + e.Number,
+				Duration:    e.Duration,
+				Description: e.ProgressText,
+			})
+		}
+		state.Episodes = eps
+		return
+	}
+
+	// Live mode
+	if ui.account != nil {
+		ui.podcastsLoading = true
+		gen := ui.currentGen()
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			shows, err := ui.account.PodcastsFeed(ctx)
+			ui.sendAction(func() {
+				ui.podcastsLoading = false
+				if gen != ui.currentGen() {
+					return
+				}
+				if err == nil {
+					state.Shows = shows
+					if len(shows) > 0 && len(state.Episodes) == 0 {
+						ui.loadPodcastShowEpisodes(shows[0])
+					}
+				}
+			})
+			ui.invalidate()
+		}()
+	}
+}
+
+func (ui *UI) loadPodcastShowEpisodes(show yt.PodcastShow) {
+	state := ui.spaces.State(SpacePodcasts)
+	state.SelectedShow = &show
+	if ui.demo {
+		return
+	}
+	if ui.account == nil {
+		return
+	}
+
+	gen := ui.currentGen()
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		episodes, err := ui.account.ShowEpisodes(ctx, show.URL)
+		ui.sendAction(func() {
+			if gen != ui.currentGen() {
+				return
+			}
+			if err == nil {
+				state.Episodes = episodes
+				state.Queue = episodes
+			}
+		})
+		ui.invalidate()
+	}()
+}
+
+func (ui *UI) loadMusicSpaceContent(chip int) {
+	state := ui.spaces.State(SpaceMusic)
+	if ui.demo && ui.demoData != nil {
+		state.Album = &yt.Album{
+			Title:  ui.demoData.Album.Title,
+			Artist: ui.demoData.Album.Artist,
+		}
+		var tracks []yt.Video
+		for _, t := range ui.demoData.Tracks {
+			tracks = append(tracks, yt.Video{
+				ID:          t.ID,
+				Title:       t.Title,
+				Channel:     t.Artist,
+				Duration:    t.Duration,
+				Description: t.Album,
+			})
+		}
+		state.Tracks = tracks
+		state.Queue = tracks
+		return
+	}
+
+	// Live mode
+	if ui.account != nil {
+		ui.musicLoading = true
+		gen := ui.currentGen()
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			tracks, err := ui.account.LikedMusic(ctx)
+			ui.sendAction(func() {
+				ui.musicLoading = false
+				if gen != ui.currentGen() {
+					return
+				}
+				if err == nil {
+					state.Tracks = tracks
+					state.Queue = tracks
+				}
+			})
+			ui.invalidate()
+		}()
+	}
 }
 
 func (ui *UI) loadMergedFeed() {
@@ -1445,10 +1887,234 @@ func (ui *UI) playSelected(audio bool) {
 
 func (ui *UI) playVideo(v yt.Video, audio bool) {
 	if audio || ui.externalPlayer {
+		if ui.debug {
+			fmt.Fprintln(os.Stderr, "space-play-route=external")
+		}
 		ui.playVideoExternal(v, audio)
 		return
 	}
+	if ui.spaces != nil && ui.state.CurrentTab == TabHome && ui.spaces.ActiveSpace != SpaceWatch {
+		ui.playSpaceVideo(v)
+		return
+	}
 	ui.openWatchPage(v)
+}
+
+func (ui *UI) playSpaceVideo(v yt.Video) {
+	if ui.demo {
+		return
+	}
+	_ = ui.store.AddHistory(v)
+	ui.state.Status = ""
+	ui.watchVideo = v
+
+	if ui.spaces != nil {
+		ui.spaces.State(ui.spaces.ActiveSpace).ResumeItem = &v
+	}
+
+	if !ui.view.Valid() && ui.embedPlayer == nil {
+		if ui.debug {
+			fmt.Fprintln(os.Stderr, "space-play-route=external-no-view")
+		}
+		ui.playVideoExternal(v, false)
+		ui.state.Status = "Embedded player unavailable on this display; playing with external mpv"
+		return
+	}
+
+	if ui.embedPlayer == nil {
+		p, err := ui.createEmbedPlayer()
+		if err != nil {
+			if ui.debug {
+				fmt.Fprintln(os.Stderr, "space-play-route=external-create-error")
+			}
+			ui.playVideoExternal(v, false)
+			ui.state.Status = fmt.Sprintf("Embedded player unavailable (%v); playing with external mpv", err)
+			return
+		}
+		ui.embedPlayer = p
+	}
+
+	cookiePath := ""
+	if ui.account != nil && ui.account.SignedIn() {
+		cookiePath, _ = ui.account.PlaybackCookieFile()
+	}
+
+	scale := ui.currentScale
+	if scale <= 0 {
+		scale = 2
+	}
+
+	codecPol := player.CodecPolicy(ui.settings.CodecPolicy)
+	formatStr := player.FormatFor(ui.power, player.ModeVideo, codecPol, ui.cachedCaps)
+	hwdec := player.HWDec(codecPol, ui.cachedCaps)
+
+	err := ui.embedPlayer.Play(embed.PlayOptions{
+		URL:         v.WatchURL(),
+		Title:       v.Title,
+		YTDLFormat:  formatStr,
+		CookiesFile: cookiePath,
+		HWDec:       hwdec,
+		WidthPx:     1280,
+		HeightPx:    720,
+		Scale:       scale,
+		Debug:       ui.debug,
+	})
+	if err != nil {
+		if ui.debug {
+			fmt.Fprintln(os.Stderr, "space-play-result=error")
+		}
+		ui.state.Status = "Playback error: " + err.Error()
+		return
+	}
+	if ui.debug {
+		fmt.Fprintln(os.Stderr, "space-play-result=embedded")
+	}
+	ui.watchPaused = false
+	ui.watchCurrentTime = 0
+	ui.watchDuration = float64(v.Duration)
+	ui.watchLastMouseMove = time.Now()
+	ui.hwdecLogged = false
+	ui.lastTimePoll = time.Now()
+
+	if ui.spaces != nil && ui.spaces.ActiveSpace == SpaceShorts {
+		ui.embedPlayer.ToggleMute()
+	}
+
+	ui.invalidate()
+}
+
+// EmbedPlayerController defines embedded player operations.
+type EmbedPlayerController interface {
+	Play(opts embed.PlayOptions) error
+	Stop()
+	SetRect(rect image.Rectangle, scale int)
+	SetHidden(hidden bool)
+	TogglePause()
+	SetPause(paused bool)
+	Seek(seconds float64, relative bool)
+	SetVolume(volume float64)
+	ToggleMute()
+	Status() embed.Status
+	Close()
+}
+
+func (ui *UI) registerVideoBox(box image.Rectangle) {
+	ui.activeVideoBox = box
+	ui.videoBoxLaidOut = true
+}
+
+func (ui *UI) label(size unit.Sp, txt string) material.LabelStyle {
+	if ui.labelHook != nil {
+		ui.labelHook(txt)
+	}
+	return material.Label(ui.th, size, txt)
+}
+
+// drawCoverImage scales an image to cover targetSize, center-crops it, clips to a rounded rectangle with radius,
+// and returns exactly the target dimensions.
+func (ui *UI) drawCoverImage(gtx layout.Context, img image.Image, targetSize image.Point, radius unit.Dp) layout.Dimensions {
+	w := targetSize.X
+	h := targetSize.Y
+	if w <= 0 || h <= 0 {
+		return layout.Dimensions{}
+	}
+
+	gtx.Constraints = layout.Exact(targetSize)
+	r := clip.UniformRRect(image.Rectangle{Max: targetSize}, gtx.Dp(radius))
+
+	if img == nil {
+		paint.FillShape(gtx.Ops, ui.colors.Raised, r.Op(gtx.Ops))
+		return layout.Dimensions{Size: targetSize}
+	}
+
+	srcBounds := img.Bounds()
+	srcW := srcBounds.Dx()
+	srcH := srcBounds.Dy()
+	if srcW <= 0 || srcH <= 0 {
+		paint.FillShape(gtx.Ops, ui.colors.Raised, r.Op(gtx.Ops))
+		return layout.Dimensions{Size: targetSize}
+	}
+
+	scaleX := float32(w) / float32(srcW)
+	scaleY := float32(h) / float32(srcH)
+	scale := scaleX
+	if scaleY > scaleX {
+		scale = scaleY
+	}
+
+	scaledW := float32(srcW) * scale
+	scaledH := float32(srcH) * scale
+	offsetX := (float32(w) - scaledW) / 2.0
+	offsetY := (float32(h) - scaledH) / 2.0
+
+	cl := r.Op(gtx.Ops).Push(gtx.Ops)
+	paint.FillShape(gtx.Ops, ui.colors.Raised, r.Op(gtx.Ops))
+
+	offOp := op.Offset(image.Pt(int(offsetX), int(offsetY))).Push(gtx.Ops)
+	aff := f32.Affine2D{}.Scale(f32.Point{}, f32.Pt(scale, scale))
+	affOp := op.Affine(aff).Push(gtx.Ops)
+
+	imgOp := paint.NewImageOp(img)
+	imgOp.Add(gtx.Ops)
+	paint.PaintOp{}.Add(gtx.Ops)
+
+	affOp.Pop()
+	offOp.Pop()
+	cl.Pop()
+
+	return layout.Dimensions{Size: targetSize}
+}
+
+// layoutPillButton renders a pill-shaped action or outline button with at least 44 dp height.
+func (ui *UI) layoutPillButton(gtx layout.Context, click *widget.Clickable, text string, primary bool) layout.Dimensions {
+	if click.Hovered() {
+		pointer.CursorPointer.Add(gtx.Ops)
+	}
+
+	return click.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		minH := gtx.Dp(44)
+		radius := gtx.Dp(22)
+
+		m := op.Record(gtx.Ops)
+		lblDims := layout.Inset{
+			Top:    unit.Dp(10),
+			Bottom: unit.Dp(10),
+			Left:   unit.Dp(20),
+			Right:  unit.Dp(20),
+		}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			lbl := material.Label(ui.th, unit.Sp(13), text)
+			if primary {
+				lbl.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+			} else {
+				lbl.Color = ui.colors.Text
+			}
+			lbl.Font.Weight = font.Bold
+			return lbl.Layout(gtx)
+		})
+		textCall := m.Stop()
+
+		btnW := lblDims.Size.X
+		btnH := lblDims.Size.Y
+		if btnH < minH {
+			btnH = minH
+		}
+		btnSize := image.Pt(btnW, btnH)
+
+		r := clip.UniformRRect(image.Rectangle{Max: btnSize}, radius)
+		if primary {
+			paint.FillShape(gtx.Ops, ui.colors.Action, r.Op(gtx.Ops))
+		} else {
+			paint.FillShape(gtx.Ops, ui.colors.Surface, r.Op(gtx.Ops))
+			paint.FillShape(gtx.Ops, ui.colors.Border, clip.Stroke{Path: r.Path(gtx.Ops), Width: float32(gtx.Dp(1))}.Op())
+		}
+
+		textOffsetY := (btnH - lblDims.Size.Y) / 2
+		off := op.Offset(image.Pt(0, textOffsetY)).Push(gtx.Ops)
+		textCall.Add(gtx.Ops)
+		off.Pop()
+
+		return layout.Dimensions{Size: btnSize}
+	})
 }
 
 func (ui *UI) playVideoExternal(v yt.Video, audio bool) {
@@ -1568,6 +2234,9 @@ func (ui *UI) requestThumbnail(vid string) {
 }
 
 func (ui *UI) layout(gtx layout.Context) layout.Dimensions {
+	ui.activeVideoBox = image.Rectangle{}
+	ui.videoBoxLaidOut = false
+	ui.maybeTriggerDebugPlayFirst()
 	ui.drainActions()
 	if ui.pendingFocusTag != nil {
 		gtx.Execute(key.FocusCmd{Tag: ui.pendingFocusTag})
@@ -1747,10 +2416,13 @@ func (ui *UI) layout(gtx layout.Context) layout.Dimensions {
 		}
 	}
 
+	ui.videoBoxLaidOut = false
+	ui.activeVideoBox = image.Rectangle{}
+
 	// Paint bg itself (opaque), so it does not depend on compositor background.
 	paint.FillShape(gtx.Ops, ui.colors.Bg, clip.Rect{Max: gtx.Constraints.Max}.Op())
 
-	return layout.Stack{}.Layout(gtx,
+	dims := layout.Stack{}.Layout(gtx,
 		layout.Stacked(func(gtx layout.Context) layout.Dimensions {
 			if ui.watchFullscreen {
 				return ui.layoutWatchPage(gtx)
@@ -1759,48 +2431,117 @@ func (ui *UI) layout(gtx layout.Context) layout.Dimensions {
 			winW := gtx.Constraints.Max.X
 			isMobile := winW < gtx.Dp(600)
 
-			contentBody := func(gtx layout.Context) layout.Dimensions {
-				if ui.state.CurrentTab == TabWatch {
-					return ui.layoutWatchPage(gtx)
-				}
-				if ui.showingUtility || ui.state.CurrentTab != TabHome {
-					return ui.layoutMainArea(gtx)
-				}
-				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-					layout.Rigid(ui.layoutPerSpaceHeading),
-					layout.Rigid(ui.layoutChips),
-					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-						switch ui.spaces.ActiveSpace {
-						case SpaceWatch:
-							return ui.layoutWatchSpace(gtx)
-						case SpaceShorts:
-							return ui.layoutPlaceholderScreen(gtx, "Shorts")
-						case SpacePodcasts:
-							return ui.layoutPlaceholderScreen(gtx, "Podcasts")
-						case SpaceMusic:
-							return ui.layoutPlaceholderScreen(gtx, "Music")
-						default:
-							return ui.layoutWatchSpace(gtx)
-						}
-					}),
-				)
-			}
-
 			if isMobile {
+				var topBarH int
+				var headingH, chipsH int
 				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-					layout.Rigid(ui.layoutTopBar),
-					layout.Flexed(1, contentBody),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						dims := ui.layoutTopBar(gtx)
+						topBarH = dims.Size.Y
+						return dims
+					}),
+					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+						if ui.state.CurrentTab == TabWatch {
+							ui.spaceOrigin = image.Pt(0, topBarH)
+							ui.spaceSize = image.Pt(winW, gtx.Constraints.Max.Y)
+							return ui.layoutWatchPage(gtx)
+						}
+						if ui.showingUtility || ui.state.CurrentTab != TabHome {
+							ui.spaceOrigin = image.Pt(0, topBarH)
+							ui.spaceSize = image.Pt(winW, gtx.Constraints.Max.Y)
+							return ui.layoutMainArea(gtx)
+						}
+						return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								dims := ui.layoutPerSpaceHeading(gtx)
+								headingH = dims.Size.Y
+								return dims
+							}),
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								dims := ui.layoutChips(gtx)
+								chipsH = dims.Size.Y
+								return dims
+							}),
+							layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+								ui.spaceOrigin = image.Pt(0, topBarH+headingH+chipsH)
+								ui.spaceSize = image.Pt(winW, gtx.Constraints.Max.Y)
+								switch ui.spaces.ActiveSpace {
+								case SpaceWatch:
+									return ui.layoutWatchSpace(gtx)
+								case SpaceShorts:
+									return ui.layoutShortsSpace(gtx)
+								case SpacePodcasts:
+									return ui.layoutPodcastsSpace(gtx)
+								case SpaceMusic:
+									return ui.layoutMusicSpace(gtx)
+								default:
+									return ui.layoutWatchSpace(gtx)
+								}
+							}),
+						)
+					}),
 					layout.Rigid(ui.layoutBottomBar),
 				)
 			}
 
 			// Desktop / Tablet shell: Rail (left) + Right Column
+			var railW int
+			var topBarH int
+			var headingH, chipsH int
 			return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
-				layout.Rigid(ui.layoutRail),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					dims := ui.layoutRail(gtx)
+					railW = dims.Size.X
+					return dims
+				}),
 				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+					colW := winW - railW
 					return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-						layout.Rigid(ui.layoutTopBar),
-						layout.Flexed(1, contentBody),
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							dims := ui.layoutTopBar(gtx)
+							topBarH = dims.Size.Y
+							return dims
+						}),
+						layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+							if ui.state.CurrentTab == TabWatch {
+								ui.spaceOrigin = image.Pt(railW, topBarH)
+								ui.spaceSize = image.Pt(colW, gtx.Constraints.Max.Y)
+								return ui.layoutWatchPage(gtx)
+							}
+							if ui.showingUtility || ui.state.CurrentTab != TabHome {
+								ui.spaceOrigin = image.Pt(railW, topBarH)
+								ui.spaceSize = image.Pt(colW, gtx.Constraints.Max.Y)
+								return ui.layoutMainArea(gtx)
+							}
+							return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+									dims := ui.layoutPerSpaceHeading(gtx)
+									headingH = dims.Size.Y
+									return dims
+								}),
+								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+									dims := ui.layoutChips(gtx)
+									chipsH = dims.Size.Y
+									return dims
+								}),
+								layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+									ui.spaceOrigin = image.Pt(railW, topBarH+headingH+chipsH)
+									ui.spaceSize = image.Pt(colW, gtx.Constraints.Max.Y)
+									switch ui.spaces.ActiveSpace {
+									case SpaceWatch:
+										return ui.layoutWatchSpace(gtx)
+									case SpaceShorts:
+										return ui.layoutShortsSpace(gtx)
+									case SpacePodcasts:
+										return ui.layoutPodcastsSpace(gtx)
+									case SpaceMusic:
+										return ui.layoutMusicSpace(gtx)
+									default:
+										return ui.layoutWatchSpace(gtx)
+									}
+								}),
+							)
+						}),
 						layout.Rigid(ui.layoutStatusBar),
 					)
 				}),
@@ -1813,6 +2554,25 @@ func (ui *UI) layout(gtx layout.Context) layout.Dimensions {
 			return ui.layoutSuggestionsDropdown(gtx)
 		}),
 	)
+
+	if ui.embedPlayer != nil {
+		if !ui.videoBoxLaidOut || ui.activeVideoBox.Empty() {
+			ui.embedPlayer.SetRect(image.Rectangle{}, ui.currentScale)
+			ui.embedPlayer.SetHidden(true)
+			if !ui.watchPaused {
+				ui.pausePlayback()
+			}
+		} else {
+			ui.embedPlayer.SetHidden(false)
+			if ui.debug && ui.activeVideoBox != ui.lastLoggedVideoBox {
+				fmt.Fprintf(os.Stderr, "video-box-px=%v scale=%d\n", ui.activeVideoBox, ui.currentScale)
+				ui.lastLoggedVideoBox = ui.activeVideoBox
+			}
+			ui.embedPlayer.SetRect(ui.activeVideoBox, ui.currentScale)
+		}
+	}
+
+	return dims
 }
 
 // layoutTopBar renders the 56dp high top bar matching DESIGN.md:
@@ -3420,6 +4180,12 @@ func (ui *UI) layoutSuggestionsDropdown(gtx layout.Context) layout.Dimensions {
 		if ui.allYouTubeClick.Clicked(gtx) {
 			ui.suggestVisible = false
 			ui.suggestSelected = -1
+			if curr := ui.spaces.Active(); curr != nil {
+				curr.Query = query
+			}
+			ui.switchSpace(SpaceWatch)
+			ui.searchEditor.SetText(query)
+			ui.lastSearchText = query
 			ui.search(query)
 			return layout.Dimensions{}
 		}
@@ -3456,7 +4222,7 @@ func (ui *UI) layoutSuggestionsDropdown(gtx layout.Context) layout.Dimensions {
 				}),
 				layout.Rigid(layout.Spacer{Width: unit.Dp(10)}.Layout),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					lbl := material.Label(ui.th, unit.Sp(13), fmt.Sprintf("Search across all YouTube for %q", query))
+					lbl := material.Label(ui.th, unit.Sp(13), fmt.Sprintf("Search all of YouTube for '%s'", query))
 					lbl.Color = ui.colors.Text
 					return lbl.Layout(gtx)
 				}),
@@ -4466,7 +5232,7 @@ func (ui *UI) openWatchPage(v yt.Video) {
 	_ = ui.store.AddHistory(v)
 	ui.state.Status = ""
 
-	if !ui.view.Valid() {
+	if !ui.view.Valid() && ui.embedPlayer == nil {
 		ui.state.CurrentTab = ui.previousTab
 		ui.playVideoExternal(v, false)
 		ui.state.Status = "Embedded player unavailable on this display; playing with external mpv"
@@ -4560,7 +5326,86 @@ func (ui *UI) triggerDebugPlay(urlStr string, playSeconds int) {
 		}
 	}
 
+	if ui.spaces != nil {
+		switch ui.spaces.ActiveSpace {
+		case SpaceShorts:
+			ui.spaces.State(SpaceShorts).ResumeItem = &v
+			ui.spaces.State(SpaceShorts).Shorts = []yt.Video{v}
+			ui.playVideo(v, false)
+			return
+		case SpacePodcasts:
+			ui.spaces.State(SpacePodcasts).ResumeItem = &v
+			ui.spaces.State(SpacePodcasts).Episodes = []yt.Video{v}
+			ui.playVideo(v, false)
+			return
+		case SpaceMusic:
+			ui.spaces.State(SpaceMusic).ResumeItem = &v
+			ui.spaces.State(SpaceMusic).Tracks = []yt.Video{v}
+			ui.playVideo(v, false)
+			return
+		}
+	}
+
 	ui.openWatchPage(v)
+}
+
+func (ui *UI) maybeTriggerDebugPlayFirst() {
+	if !ui.debugPlayFirst || ui.debugPlayTriggered || !ui.firstFramePresented {
+		return
+	}
+	if ui.spaces == nil {
+		return
+	}
+	switch ui.spaces.ActiveSpace {
+	case SpaceMusic:
+		state := ui.spaces.State(SpaceMusic)
+		if len(state.Tracks) > 0 {
+			ui.debugPlayTriggered = true
+			ui.debugPlayFirst = false
+			if ui.debug {
+				fmt.Fprintln(os.Stderr, "debug-selected-first=music")
+			}
+			item := state.Tracks[0]
+			tracks := append([]yt.Video(nil), state.Tracks...)
+			ui.sendAction(func() { ui.selectMusicTrack(item, tracks) })
+			ui.invalidate()
+		}
+	case SpacePodcasts:
+		state := ui.spaces.State(SpacePodcasts)
+		if len(state.Episodes) > 0 {
+			ui.debugPlayTriggered = true
+			ui.debugPlayFirst = false
+			if ui.debug {
+				fmt.Fprintln(os.Stderr, "debug-selected-first=podcasts")
+			}
+			item := state.Episodes[0]
+			episodes := append([]yt.Video(nil), state.Episodes...)
+			ui.sendAction(func() { ui.selectPodcastEpisode(item, episodes) })
+			ui.invalidate()
+		}
+	case SpaceShorts:
+		state := ui.spaces.State(SpaceShorts)
+		if len(state.Shorts) > 0 {
+			ui.debugPlayTriggered = true
+			ui.debugPlayFirst = false
+			if ui.debug {
+				fmt.Fprintln(os.Stderr, "debug-selected-first=shorts")
+			}
+			item := state.Shorts[0]
+			shorts := append([]yt.Video(nil), state.Shorts...)
+			ui.sendAction(func() { ui.selectShort(item, shorts) })
+			ui.invalidate()
+		}
+	case SpaceWatch:
+		state := ui.spaces.State(SpaceWatch)
+		if len(state.Videos) > 0 {
+			ui.debugPlayTriggered = true
+			ui.debugPlayFirst = false
+			item := state.Videos[0]
+			state.ResumeItem = &item
+			ui.playVideo(item, false)
+		}
+	}
 }
 
 func (ui *UI) layoutWatchPage(gtx layout.Context) layout.Dimensions {
@@ -4581,9 +5426,7 @@ func (ui *UI) layoutWatchPage(gtx layout.Context) layout.Dimensions {
 			videoH = winH - controlsH
 		}
 
-		if ui.embedPlayer != nil {
-			ui.embedPlayer.SetRect(image.Rect(0, 0, winW, videoH), scale)
-		}
+		ui.registerVideoBox(image.Rect(0, 0, winW, videoH))
 
 		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -4617,13 +5460,17 @@ func (ui *UI) layoutWatchPage(gtx layout.Context) layout.Dimensions {
 	videoH := videoW * 9 / 16
 
 	// Video rect in window DIPs:
-	// Inset: Left 16dp, Top 56dp (top bar) + 16dp = 72dp
-	videoX := gtx.Dp(16)
-	videoY := gtx.Dp(56) + gtx.Dp(16)
-
-	if ui.embedPlayer != nil {
-		ui.embedPlayer.SetRect(image.Rect(videoX, videoY, videoX+videoW, videoY+videoH), scale)
+	videoX := ui.spaceOrigin.X + gtx.Dp(16)
+	videoY := ui.spaceOrigin.Y + gtx.Dp(16)
+	if !isWide {
+		videoY -= ui.watchList.Position.Offset
 	}
+
+	videoRect := image.Rect(videoX, videoY, videoX+videoW, videoY+videoH)
+	if !isWide && (ui.watchList.Position.First > 0 || ui.watchList.Position.Offset > 0 || videoY+videoH <= ui.spaceOrigin.Y) {
+		videoRect = image.Rectangle{}
+	}
+	ui.registerVideoBox(videoRect)
 
 	return layout.Inset{
 		Left:   unit.Dp(16),
@@ -4687,6 +5534,11 @@ func (ui *UI) layoutVideoArea(gtx layout.Context, w, h int) layout.Dimensions {
 	box := image.Pt(w, h)
 	gtx.Constraints.Min = box
 	gtx.Constraints.Max = box
+
+	if ui.debugVideoMarker && !ui.activeVideoBox.Empty() {
+		paint.FillShape(gtx.Ops, color.NRGBA{R: 0x00, G: 0xff, B: 0x01, A: 0xff}, clip.Rect(image.Rect(0, 0, w, h)).Op())
+		return layout.Dimensions{Size: box}
+	}
 
 	if ui.demo {
 		paint.FillShape(gtx.Ops, ui.colors.Surface, clip.Rect(image.Rect(0, 0, w, h)).Op())
@@ -4835,9 +5687,7 @@ func (ui *UI) layoutControlsBar(gtx layout.Context, widthPx int) layout.Dimensio
 					}),
 					layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						curStr := yt.FormatDuration(int(ui.watchCurrentTime))
-						durStr := yt.FormatDuration(int(ui.watchDuration))
-						timeStr := fmt.Sprintf("%s / %s", curStr, durStr)
+						timeStr := formatPlaybackTime(ui.watchCurrentTime, ui.watchDuration)
 						lbl := material.Label(ui.th, unit.Sp(13), timeStr)
 						lbl.Color = ui.colors.Text
 						return lbl.Layout(gtx)

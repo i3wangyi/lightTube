@@ -55,6 +55,32 @@ func RenderPNG(opts Options, sizeStr, outPath string) error {
 		}
 	}()
 
+	// Determine target space either from opts.DebugSpace or from outPath filename
+	targetSpace := opts.DebugSpace
+	if targetSpace == "" {
+		lowerOut := strings.ToLower(outPath)
+		if strings.Contains(lowerOut, "shorts") {
+			targetSpace = "shorts"
+		} else if strings.Contains(lowerOut, "podcast") {
+			targetSpace = "podcasts"
+		} else if strings.Contains(lowerOut, "music") {
+			targetSpace = "music"
+		}
+	}
+
+	if targetSpace != "" {
+		switch strings.ToLower(targetSpace) {
+		case "shorts":
+			ui.switchSpace(SpaceShorts)
+		case "podcasts":
+			ui.switchSpace(SpacePodcasts)
+		case "music":
+			ui.switchSpace(SpaceMusic)
+		case "watch":
+			ui.switchSpace(SpaceWatch)
+		}
+	}
+
 	if opts.DebugWatch {
 		var v yt.Video
 		if len(ui.state.Videos) > 0 {
@@ -66,8 +92,15 @@ func RenderPNG(opts Options, sizeStr, outPath string) error {
 	}
 	if opts.DebugChip >= 0 {
 		ui.spaces.Active().Chip = opts.DebugChip
-		if ui.spaces.ActiveSpace == SpaceWatch {
+		switch ui.spaces.ActiveSpace {
+		case SpaceWatch:
 			ui.loadWatchSpaceContent(opts.DebugChip)
+		case SpaceShorts:
+			ui.loadShortsSpaceContent(opts.DebugChip)
+		case SpacePodcasts:
+			ui.loadPodcastsSpaceContent(opts.DebugChip)
+		case SpaceMusic:
+			ui.loadMusicSpaceContent(opts.DebugChip)
 		}
 	}
 	if opts.AmbientOff {

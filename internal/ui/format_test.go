@@ -37,6 +37,29 @@ func TestFormatViewCount(t *testing.T) {
 	}
 }
 
+func TestFormatPlaybackTimeDurationStates(t *testing.T) {
+	tests := []struct {
+		name     string
+		position float64
+		duration float64
+		want     string
+	}{
+		{"unknown duration position", 1, 0, "00:01"},
+		{"known duration", 1, 60, "00:01 / 01:00"},
+		{"real zero position", 0, 60, "00:00 / 01:00"},
+		{"zero position unknown duration", 0, 0, "00:00"},
+	}
+	for _, space := range []string{"Watch", "Shorts", "Podcasts", "Music"} {
+		for _, tt := range tests {
+			t.Run(space+"/"+tt.name, func(t *testing.T) {
+				if got := formatPlaybackTime(tt.position, tt.duration); got != tt.want {
+					t.Fatalf("formatPlaybackTime(%v, %v) = %q, want %q", tt.position, tt.duration, got, tt.want)
+				}
+			})
+		}
+	}
+}
+
 func TestFormatMetaLine(t *testing.T) {
 	now := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
 	threeDaysAgo := now.Add(-3 * 24 * time.Hour)

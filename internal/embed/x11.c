@@ -278,9 +278,14 @@ void x11_embed_player_set_rect(x11_embed_context *ctx, int x_px, int y_px, int w
     if (!ctx) return;
     pthread_mutex_lock(&ctx->lock);
     if (ctx->display && ctx->child_window) {
-        unsigned int w = w_px > 0 ? (unsigned int)w_px : 1;
-        unsigned int h = h_px > 0 ? (unsigned int)h_px : 1;
-        ctx->x11.XMoveResizeWindow(ctx->display, ctx->child_window, x_px, y_px, w, h);
+        if (w_px <= 0 || h_px <= 0) {
+            ctx->is_hidden = true;
+            ctx->x11.XUnmapWindow(ctx->display, ctx->child_window);
+        } else {
+            ctx->is_hidden = false;
+            ctx->x11.XMapWindow(ctx->display, ctx->child_window);
+            ctx->x11.XMoveResizeWindow(ctx->display, ctx->child_window, x_px, y_px, (unsigned int)w_px, (unsigned int)h_px);
+        }
         ctx->x11.XFlush(ctx->display);
     }
     pthread_mutex_unlock(&ctx->lock);

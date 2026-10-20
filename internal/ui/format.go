@@ -4,7 +4,17 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"lighttube/internal/yt"
 )
+
+func formatPlaybackTime(position, duration float64) string {
+	positionText := yt.FormatDuration(int(position))
+	if duration <= 0 {
+		return positionText
+	}
+	return fmt.Sprintf("%s / %s", positionText, yt.FormatDuration(int(duration)))
+}
 
 // FormatViewCount formats view counts according to YouTube convention:
 // 999, 1.2K, 34K, 1.2M, 3.4B.

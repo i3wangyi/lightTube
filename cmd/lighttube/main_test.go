@@ -294,10 +294,12 @@ func TestDemoIsolationLiveXDGDirsUnchanged(t *testing.T) {
 		_ = os.Chmod(cacheLt, 0o755)
 	})
 
-	outPNG := filepath.Join(t.TempDir(), "out.png")
-	err := run([]string{"--demo", "--render-png", "100x100", outPNG})
-	if err != nil {
-		t.Fatalf("run with --demo failed: %v", err)
+	for _, sp := range []string{"watch", "shorts", "podcasts", "music"} {
+		outPNG := filepath.Join(t.TempDir(), "out-"+sp+".png")
+		err := run([]string{"--demo", "--space", sp, "--render-png", "100x100", outPNG})
+		if err != nil {
+			t.Fatalf("run with --demo --space %s failed: %v", sp, err)
+		}
 	}
 
 	// Restore permissions before comparing snapshots

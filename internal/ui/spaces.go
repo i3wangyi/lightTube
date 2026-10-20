@@ -61,7 +61,7 @@ func GetSpaceConfig(id SpaceID) SpaceConfig {
 			Title:    "A little discovery",
 			Subtitle: "Short videos in their own space. Your Watch queue stays yours.",
 			Badge:    "Sound off",
-			Chips:    []string{"Explore", "Following", "Saved"},
+			Chips:    []string{"Following", "Saved", "Explore"},
 		}
 	case SpacePodcasts:
 		return SpaceConfig{
@@ -79,7 +79,7 @@ func GetSpaceConfig(id SpaceID) SpaceConfig {
 			Title:    "Something for right now",
 			Subtitle: "Tracks, albums, and collections. All in one place.",
 			Badge:    "Visible player",
-			Chips:    []string{"Discover", "Albums", "Saved"},
+			Chips:    []string{"Liked", "Albums", "Saved"},
 		}
 	default:
 		return GetSpaceConfig(SpaceWatch)
@@ -96,6 +96,20 @@ type SpaceState struct {
 	Queue      []yt.Video  // Queue belonging to this space
 	ResumeItem *yt.Video   // Hero / resume item
 	Videos     []yt.Video  // Cached video items for this space
+
+	// Shorts specific state
+	ShortIndex int
+	Shorts     []yt.Video
+
+	// Podcasts specific state
+	Shows        []yt.PodcastShow
+	SelectedShow *yt.PodcastShow
+	Episodes     []yt.Video
+
+	// Music specific state
+	Album        *yt.Album
+	Tracks       []yt.Video
+	CurrentTrack *yt.Video
 }
 
 // SpacesManager manages all 4 spaces and their switching.
@@ -105,6 +119,28 @@ type SpacesManager struct {
 	SpaceClicks map[SpaceID]*widget.Clickable
 	ChipClicks  [8]widget.Clickable
 	AmbientBtn  widget.Clickable
+
+	// Shorts controls
+	ShortsPrevClick    widget.Clickable
+	ShortsNextClick    widget.Clickable
+	ShortsSaveClick    widget.Clickable
+	ShortsRelatedClick widget.Clickable
+	ShortsStageClick   widget.Clickable
+	ShortsOpenWatchBtn widget.Clickable
+
+	// Podcasts controls
+	ShowClicks       []widget.Clickable
+	EpisodeClicks    []widget.Clickable
+	PodcastsDockPlay widget.Clickable
+
+	// Music controls
+	MusicOpenColBtn widget.Clickable
+	MusicSaveColBtn widget.Clickable
+	TrackClicks     []widget.Clickable
+	MusicDockPlay   widget.Clickable
+
+	// Broad search ("All YouTube")
+	AllYouTubeClick widget.Clickable
 }
 
 // NewSpacesManager creates a SpacesManager with all 4 spaces initialized.

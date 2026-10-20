@@ -589,6 +589,11 @@ void embed_player_set_rect(embed_context *ctx, int x_px, int y_px, int w_px, int
     int y_surf = y_px / cur_scale;
 
     pthread_mutex_lock(&ctx->lock);
+    if (w_px <= 0 || h_px <= 0) {
+        ctx->is_hidden = true;
+    } else {
+        ctx->is_hidden = false;
+    }
     if (ctx->pos_x_surf != x_surf || ctx->pos_y_surf != y_surf) {
         ctx->pos_x_surf = x_surf;
         ctx->pos_y_surf = y_surf;

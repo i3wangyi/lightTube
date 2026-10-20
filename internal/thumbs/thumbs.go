@@ -149,6 +149,7 @@ type Manager struct {
 	flightMu sync.Mutex
 	epoch    uint64
 	inFlight map[string][]func(image.Image, error)
+	rawURLs  map[string]string
 
 	avatarFlightMu sync.Mutex
 	avatarInFlight map[string][]func(image.Image, error)
@@ -178,6 +179,7 @@ func NewWithOptions(client *http.Client, cacheDir string, lruBytes int) *Manager
 		lru:            newLRUCache(lruBytes),
 		avatarLRU:      newLRUCache(DefaultAvatarByteBudget),
 		inFlight:       make(map[string][]func(image.Image, error)),
+		rawURLs:        make(map[string]string),
 		avatarInFlight: make(map[string][]func(image.Image, error)),
 	}
 }
@@ -261,9 +263,25 @@ func (m *Manager) LoadCount() int64 {
 	return m.loadCalls.Load()
 }
 
+// Request initiates loading a thumbnail for the given id (and optional rawURL fallback) asynchronously.
+func (m *Manager) Request(id, rawURL string) {
+	if m == nil || id == "" {
+		return
+	}
+	if _, ok := m.Get(id); ok {
+		return
+	}
+	m.LoadWithURL(id, rawURL, nil)
+}
+
 // Load requests a thumbnail asynchronously. Network fetching and image decoding
 // execute off the caller goroutine. The callback is invoked when the image is ready.
 func (m *Manager) Load(id string, callback func(image.Image, error)) {
+	m.LoadWithURL(id, "", callback)
+}
+
+// LoadWithURL requests a thumbnail asynchronously with an optional fallback direct image URL.
+func (m *Manager) LoadWithURL(id, rawURL string, callback func(image.Image, error)) {
 	if m != nil {
 		m.loadCalls.Add(1)
 	}
@@ -283,6 +301,12 @@ func (m *Manager) Load(id string, callback func(image.Image, error)) {
 	}
 
 	m.flightMu.Lock()
+	if rawURL != "" {
+		if m.rawURLs == nil {
+			m.rawURLs = make(map[string]string)
+		}
+		m.rawURLs[id] = rawURL
+	}
 	epoch := m.epoch
 	waiters, inProgress := m.inFlight[id]
 	if callback != nil {
@@ -323,7 +347,15 @@ func (m *Manager) Fetch(ctx context.Context, id string) (image.Image, error) {
 }
 
 func (m *Manager) processThumbnail(epoch uint64, id string) {
-	img, err := m.loadOrFetchAndDecode(id)
+	m.flightMu.Lock()
+	rawURL := ""
+	if m.rawURLs != nil {
+		rawURL = m.rawURLs[id]
+		delete(m.rawURLs, id)
+	}
+	m.flightMu.Unlock()
+
+	img, err := m.loadOrFetchAndDecode(id, rawURL)
 
 	m.flightMu.Lock()
 	if epoch != m.epoch {
@@ -347,7 +379,7 @@ func (m *Manager) processThumbnail(epoch uint64, id string) {
 	}
 }
 
-func (m *Manager) loadOrFetchAndDecode(id string) (image.Image, error) {
+func (m *Manager) loadOrFetchAndDecode(id, rawURL string) (image.Image, error) {
 	// Disk cache file is <id>-hq.jpg. Older <id>.jpg files are low-res and ignored.
 	cacheFile := filepath.Join(m.cacheDir, id+"-hq.jpg")
 
@@ -359,17 +391,23 @@ func (m *Manager) loadOrFetchAndDecode(id string) (image.Image, error) {
 		}
 	}
 
-	// 2. Fetch order: hq720.jpg -> hqdefault.jpg cropped to 16:9 -> mqdefault.jpg.
+	// 2. Fetch candidates.
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	candidates := []string{
+	var candidates []string
+	if rawURL != "" {
+		candidates = append(candidates, rawURL)
+	}
+	candidates = append(candidates,
 		fmt.Sprintf("https://i.ytimg.com/vi/%s/hq720.jpg", id),
 		fmt.Sprintf("https://i.ytimg.com/vi/%s/hqdefault.jpg", id),
 		fmt.Sprintf("https://i.ytimg.com/vi/%s/mqdefault.jpg", id),
-	}
+	)
 
-	for idx, u := range candidates {
+	hqDefaultURL := fmt.Sprintf("https://i.ytimg.com/vi/%s/hqdefault.jpg", id)
+
+	for _, u := range candidates {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 		if err != nil {
 			continue
@@ -396,7 +434,7 @@ func (m *Manager) loadOrFetchAndDecode(id string) (image.Image, error) {
 			continue
 		}
 
-		if idx == 1 {
+		if u == hqDefaultURL {
 			// hqdefault.jpg is 4:3 with top/bottom black bars; crop to 16:9.
 			cropped := cropHQDefault(img)
 			var buf bytes.Buffer

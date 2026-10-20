@@ -84,11 +84,28 @@ func run(args []string) error {
 	var renderPNGSize string
 	var renderPNGOut string
 	var debugChip int = -1
+	var debugSpace string
 	var ambientOff bool
 	var debugWatch bool
+	var debugVideoMarker bool
+	var debugPlayFirst bool
+	var debugSeekSeconds int
 	var filtered []string
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
+		if arg == "--debug-video-marker" {
+			debugVideoMarker = true
+			continue
+		}
+		if arg == "--debug-play-first" {
+			debugPlayFirst = true
+			continue
+		}
+		if arg == "--debug-seek" && i+1 < len(args) {
+			debugSeekSeconds, _ = strconv.Atoi(args[i+1])
+			i++
+			continue
+		}
 		if arg == "--demo" {
 			demo = true
 			continue
@@ -102,6 +119,11 @@ func run(args []string) error {
 		}
 		if (arg == "--debug-chip" || arg == "--chip") && i+1 < len(args) {
 			debugChip, _ = strconv.Atoi(args[i+1])
+			i++
+			continue
+		}
+		if (arg == "--debug-space" || arg == "--space") && i+1 < len(args) {
+			debugSpace = args[i+1]
 			i++
 			continue
 		}
@@ -236,8 +258,12 @@ func run(args []string) error {
 			Demo:              demo,
 			DebugSize:         debugSize,
 			DebugChip:         debugChip,
+			DebugSpace:        debugSpace,
 			AmbientOff:        ambientOff,
 			DebugWatch:        debugWatch,
+			DebugVideoMarker:  debugVideoMarker,
+			DebugPlayFirst:    debugPlayFirst,
+			DebugSeekSeconds:  debugSeekSeconds,
 		}
 
 		if renderPNG {
