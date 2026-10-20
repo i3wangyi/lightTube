@@ -451,3 +451,135 @@ func drawPersonIcon(gtx layout.Context, bounds image.Rectangle, col color.NRGBA)
 		Width: strokeW,
 	}.Op())
 }
+
+// drawWatchIcon draws a screen with a play triangle for the Watch space.
+func drawWatchIcon(gtx layout.Context, bounds image.Rectangle, col color.NRGBA) {
+	minX := float32(bounds.Min.X)
+	minY := float32(bounds.Min.Y)
+	scale := float32(bounds.Dx()) / 24.0
+	strokeW := 1.8 * scale
+
+	// Outer screen rectangle
+	r := clip.UniformRRect(image.Rect(
+		int(minX+3*scale), int(minY+4*scale),
+		int(minX+21*scale), int(minY+18*scale),
+	), int(2*scale))
+	paint.FillShape(gtx.Ops, col, clip.Stroke{Path: r.Path(gtx.Ops), Width: strokeW}.Op())
+
+	// Play triangle inside
+	cx := minX + 12*scale
+	cy := minY + 11*scale
+	var tri clip.Path
+	tri.Begin(gtx.Ops)
+	tri.MoveTo(f32.Pt(cx-2*scale, cy-3*scale))
+	tri.LineTo(f32.Pt(cx-2*scale, cy+3*scale))
+	tri.LineTo(f32.Pt(cx+3*scale, cy))
+	tri.Close()
+	paint.FillShape(gtx.Ops, col, clip.Outline{Path: tri.End()}.Op())
+}
+
+// drawShortsIcon draws a portrait screen with a play triangle for the Shorts space.
+func drawShortsIcon(gtx layout.Context, bounds image.Rectangle, col color.NRGBA) {
+	minX := float32(bounds.Min.X)
+	minY := float32(bounds.Min.Y)
+	scale := float32(bounds.Dx()) / 24.0
+	strokeW := 1.8 * scale
+
+	// Portrait screen
+	r := clip.UniformRRect(image.Rect(
+		int(minX+6*scale), int(minY+3*scale),
+		int(minX+18*scale), int(minY+21*scale),
+	), int(2.5*scale))
+	paint.FillShape(gtx.Ops, col, clip.Stroke{Path: r.Path(gtx.Ops), Width: strokeW}.Op())
+
+	// Play triangle
+	cx := minX + 12*scale
+	cy := minY + 12*scale
+	var tri clip.Path
+	tri.Begin(gtx.Ops)
+	tri.MoveTo(f32.Pt(cx-2*scale, cy-2.5*scale))
+	tri.LineTo(f32.Pt(cx-2*scale, cy+2.5*scale))
+	tri.LineTo(f32.Pt(cx+2.5*scale, cy))
+	tri.Close()
+	paint.FillShape(gtx.Ops, col, clip.Outline{Path: tri.End()}.Op())
+}
+
+// drawPodcastsIcon draws a microphone/headphones icon for the Podcasts space.
+func drawPodcastsIcon(gtx layout.Context, bounds image.Rectangle, col color.NRGBA) {
+	cx := float32(bounds.Min.X + bounds.Dx()/2)
+	minY := float32(bounds.Min.Y)
+	scale := float32(bounds.Dx()) / 24.0
+	strokeW := 1.8 * scale
+
+	// Headphone arch
+	var arch clip.Path
+	arch.Begin(gtx.Ops)
+	arch.MoveTo(f32.Pt(cx-7*scale, minY+14*scale))
+	arch.LineTo(f32.Pt(cx-7*scale, minY+11*scale))
+	arch.QuadTo(f32.Pt(cx-7*scale, minY+4*scale), f32.Pt(cx, minY+4*scale))
+	arch.QuadTo(f32.Pt(cx+7*scale, minY+4*scale), f32.Pt(cx+7*scale, minY+11*scale))
+	arch.LineTo(f32.Pt(cx+7*scale, minY+14*scale))
+	paint.FillShape(gtx.Ops, col, clip.Stroke{Path: arch.End(), Width: strokeW}.Op())
+
+	// Left and right earpieces
+	lEar := clip.UniformRRect(image.Rect(
+		int(cx-8.5*scale), int(minY+11*scale),
+		int(cx-5*scale), int(minY+18*scale),
+	), int(1.5*scale))
+	paint.FillShape(gtx.Ops, col, lEar.Op(gtx.Ops))
+
+	rEar := clip.UniformRRect(image.Rect(
+		int(cx+5*scale), int(minY+11*scale),
+		int(cx+8.5*scale), int(minY+18*scale),
+	), int(1.5*scale))
+	paint.FillShape(gtx.Ops, col, rEar.Op(gtx.Ops))
+}
+
+// drawMusicIcon draws a musical note icon for the Music space.
+func drawMusicIcon(gtx layout.Context, bounds image.Rectangle, col color.NRGBA) {
+	minX := float32(bounds.Min.X)
+	minY := float32(bounds.Min.Y)
+	scale := float32(bounds.Dx()) / 24.0
+	strokeW := 1.8 * scale
+
+	// Note stem and beam
+	var note clip.Path
+	note.Begin(gtx.Ops)
+	note.MoveTo(f32.Pt(minX+9*scale, minY+17*scale))
+	note.LineTo(f32.Pt(minX+9*scale, minY+5*scale))
+	note.LineTo(f32.Pt(minX+19*scale, minY+3*scale))
+	note.LineTo(f32.Pt(minX+19*scale, minY+15*scale))
+	paint.FillShape(gtx.Ops, col, clip.Stroke{Path: note.End(), Width: strokeW}.Op())
+
+	// Secondary beam
+	var beam clip.Path
+	beam.Begin(gtx.Ops)
+	beam.MoveTo(f32.Pt(minX+9*scale, minY+8*scale))
+	beam.LineTo(f32.Pt(minX+19*scale, minY+6*scale))
+	paint.FillShape(gtx.Ops, col, clip.Stroke{Path: beam.End(), Width: strokeW}.Op())
+
+	// Note heads (ellipses)
+	h1 := clip.Ellipse(image.Rect(int(minX+5.5*scale), int(minY+14*scale), int(minX+9.5*scale), int(minY+18*scale)))
+	paint.FillShape(gtx.Ops, col, h1.Op(gtx.Ops))
+
+	h2 := clip.Ellipse(image.Rect(int(minX+15.5*scale), int(minY+12*scale), int(minX+19.5*scale), int(minY+16*scale)))
+	paint.FillShape(gtx.Ops, col, h2.Op(gtx.Ops))
+}
+
+// drawLibraryIcon draws a bookmark ribbon icon for the Library utility.
+func drawLibraryIcon(gtx layout.Context, bounds image.Rectangle, col color.NRGBA) {
+	cx := float32(bounds.Min.X + bounds.Dx()/2)
+	minY := float32(bounds.Min.Y)
+	scale := float32(bounds.Dx()) / 24.0
+	strokeW := 1.8 * scale
+
+	var bm clip.Path
+	bm.Begin(gtx.Ops)
+	bm.MoveTo(f32.Pt(cx-6*scale, minY+4*scale))
+	bm.LineTo(f32.Pt(cx+6*scale, minY+4*scale))
+	bm.LineTo(f32.Pt(cx+6*scale, minY+20*scale))
+	bm.LineTo(f32.Pt(cx, minY+15*scale))
+	bm.LineTo(f32.Pt(cx-6*scale, minY+20*scale))
+	bm.Close()
+	paint.FillShape(gtx.Ops, col, clip.Stroke{Path: bm.End(), Width: strokeW}.Op())
+}

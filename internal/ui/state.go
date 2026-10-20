@@ -54,6 +54,7 @@ const (
 	ActionFocusSearch
 	ActionPasteURL
 	ActionSwitchTab
+	ActionSwitchSpace
 	ActionMoveSelection
 	ActionWatchTogglePause
 	ActionWatchSeek
@@ -66,7 +67,21 @@ const (
 // ResolveKeyAction determines the high-level UI action for a key press event.
 // It respects whether an editor currently holds focus.
 func ResolveKeyAction(name key.Name, mods key.Modifiers, isEditorFocused bool) (KeyAction, Tab, int) {
-	// Ctrl+1..5 switches to the mini guide items (Home, Subs, Later, History, Account).
+	// Alt+1..4 switches to the four spaces (Watch, Shorts, Podcasts, Music).
+	if mods.Contain(key.ModAlt) {
+		switch name {
+		case "1":
+			return ActionSwitchSpace, Tab(SpaceWatch), 0
+		case "2":
+			return ActionSwitchSpace, Tab(SpaceShorts), 0
+		case "3":
+			return ActionSwitchSpace, Tab(SpacePodcasts), 0
+		case "4":
+			return ActionSwitchSpace, Tab(SpaceMusic), 0
+		}
+	}
+
+	// Ctrl+1..5 switches to mini guide / utility targets (Home, Subs, Later, History, Account).
 	if mods.Contain(key.ModShortcut) {
 		switch name {
 		case "1":
@@ -116,6 +131,20 @@ func ResolveKeyAction(name key.Name, mods key.Modifiers, isEditorFocused bool) (
 
 // ResolveWatchKeyAction handles keyboard shortcuts specific to the watch page.
 func ResolveWatchKeyAction(name key.Name, mods key.Modifiers, isEditorFocused bool) (KeyAction, Tab, int) {
+	// Alt+1..4 switches to spaces: Watch, Shorts, Podcasts, Music.
+	if mods.Contain(key.ModAlt) {
+		switch name {
+		case "1":
+			return ActionSwitchSpace, Tab(SpaceWatch), 0
+		case "2":
+			return ActionSwitchSpace, Tab(SpaceShorts), 0
+		case "3":
+			return ActionSwitchSpace, Tab(SpacePodcasts), 0
+		case "4":
+			return ActionSwitchSpace, Tab(SpaceMusic), 0
+		}
+	}
+
 	if mods.Contain(key.ModShortcut) {
 		switch name {
 		case "1":

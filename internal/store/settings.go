@@ -34,6 +34,15 @@ type Settings struct {
 	Player        string          `json:"player"`
 	ActiveAccount string          `json:"active_account"`
 	Accounts      []AccountConfig `json:"accounts,omitempty"`
+	Ambient       *bool           `json:"ambient,omitempty"`
+}
+
+// AmbientEnabled reports whether the ambient glow setting is turned on (default true).
+func (s Settings) AmbientEnabled() bool {
+	if s.Ambient == nil {
+		return true
+	}
+	return *s.Ambient
 }
 
 // DefaultAccountConfig returns the default migrated account pointing to legacy paths.
@@ -62,12 +71,14 @@ func DefaultSettings() Settings {
 func DefaultSettingsWithDir(dataDir string) Settings {
 	defBrowser := platform.DefaultBrowserSpec()
 	defAcc := DefaultAccountConfig(dataDir, defBrowser)
+	ambientOn := true
 	return Settings{
 		BrowserSpec:   defBrowser,
 		CodecPolicy:   string(player.CodecPolicyAuto),
 		Player:        PlayerInplace,
 		ActiveAccount: "default",
 		Accounts:      []AccountConfig{defAcc},
+		Ambient:       &ambientOn,
 	}
 }
 
@@ -93,6 +104,10 @@ func (s Settings) NormalizeWithDir(dataDir string) Settings {
 		// valid
 	default:
 		s.Player = def.Player
+	}
+	if s.Ambient == nil {
+		ambientOn := true
+		s.Ambient = &ambientOn
 	}
 
 	// Migrate accounts: if accounts list is empty, initialize account "default"

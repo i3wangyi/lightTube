@@ -229,10 +229,10 @@ func TestHoverPreviewFrameTimerHeadless(t *testing.T) {
 		t.Fatalf("expected no InvalidateCmd when nothing is hovered, got wakeup at %v", wakeup)
 	}
 
-	// 2. Move pointer to hover the first card thumbnail (around x=150, y=180).
+	// 2. Move pointer to hover the thumbnail (at x=350, y=250 in the 216dp rail shell).
 	r.Queue(pointer.Event{
 		Kind:     pointer.Move,
-		Position: f32.Pt(150, 180),
+		Position: f32.Pt(350, 250),
 	})
 	now = now.Add(50 * time.Millisecond)
 	frame(now)

@@ -139,6 +139,14 @@ func (s *Store) SaveSettings(cfg Settings) error {
 	return nil
 }
 
+// SetAmbient updates the persistent ambient glow setting.
+func (s *Store) SetAmbient(enabled bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.settings.Ambient = &enabled
+	return s.saveSettingsLocked()
+}
+
 func (s *Store) saveSettingsLocked() error {
 	cfg := s.settings.NormalizeWithDir(s.dir)
 	if err := atomicWriteJSON(filepath.Join(s.dir, "settings.json"), cfg); err != nil {

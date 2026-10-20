@@ -16,48 +16,60 @@ import (
 	"lighttube/internal/platform"
 )
 
-// ThemeColors defines the color scheme for the dark theme matching DESIGN.md.
+// ThemeColors defines the color scheme for the dark theme matching DESIGN.md Phase 10.
 type ThemeColors struct {
 	Bg             color.NRGBA
 	Surface        color.NRGBA
-	SurfaceHover   color.NRGBA
+	Raised         color.NRGBA
+	Hover          color.NRGBA
 	Border         color.NRGBA
 	BorderFocused  color.NRGBA
 	Text           color.NRGBA
 	Text2          color.NRGBA
-	Red            color.NRGBA
+	Accent         color.NRGBA
+	Action         color.NRGBA
+	Overlay        color.NRGBA
+	AmbientWatch   color.NRGBA
+	AmbientMusic   color.NRGBA
 	BadgeBg        color.NRGBA
 	BadgeFg        color.NRGBA
 	ChipActiveBg   color.NRGBA
 	ChipActiveText color.NRGBA
 
 	// Aliases for compatibility with earlier code
+	Red           color.NRGBA
+	SurfaceHover  color.NRGBA
+	SurfaceSelect color.NRGBA
 	Fg            color.NRGBA
 	Subdued       color.NRGBA
-	Accent        color.NRGBA
-	SurfaceSelect color.NRGBA
 }
 
-// DarkColors contains color definitions for the dark UI mode from DESIGN.md.
+// DarkColors contains color definitions for the dark UI mode from DESIGN.md Phase 10.
 var DarkColors = ThemeColors{
 	Bg:             color.NRGBA{R: 0x0f, G: 0x0f, B: 0x0f, A: 0xff},
-	Surface:        color.NRGBA{R: 0x27, G: 0x27, B: 0x27, A: 0xff},
-	SurfaceHover:   color.NRGBA{R: 0x3f, G: 0x3f, B: 0x3f, A: 0xff},
-	Border:         color.NRGBA{R: 0x30, G: 0x30, B: 0x30, A: 0xff},
+	Surface:        color.NRGBA{R: 0x18, G: 0x18, B: 0x18, A: 0xff},
+	Raised:         color.NRGBA{R: 0x27, G: 0x27, B: 0x27, A: 0xff},
+	Hover:          color.NRGBA{R: 0x35, G: 0x35, B: 0x35, A: 0xff},
+	Border:         color.NRGBA{R: 0x38, G: 0x38, B: 0x38, A: 0xff},
 	BorderFocused:  color.NRGBA{R: 0x1c, G: 0x62, B: 0xb9, A: 0xff},
 	Text:           color.NRGBA{R: 0xf1, G: 0xf1, B: 0xf1, A: 0xff},
 	Text2:          color.NRGBA{R: 0xaa, G: 0xaa, B: 0xaa, A: 0xff},
-	Red:            color.NRGBA{R: 0xff, G: 0x00, B: 0x00, A: 0xff},
-	BadgeBg:        color.NRGBA{R: 0x00, G: 0x00, B: 0x00, A: 0xcc}, // 80% alpha
+	Accent:         color.NRGBA{R: 0xff, G: 0x00, B: 0x33, A: 0xff},
+	Action:         color.NRGBA{R: 0xc9, G: 0x00, B: 0x28, A: 0xff},
+	Overlay:        color.NRGBA{R: 0x00, G: 0x00, B: 0x00, A: 0xb8}, // rgba(0,0,0,.72)
+	AmbientWatch:   color.NRGBA{R: 88, G: 126, B: 161, A: 71},       // rgba(88,126,161,.28)
+	AmbientMusic:   color.NRGBA{R: 80, G: 57, B: 134, A: 51},        // rgba(80,57,134,.20)
+	BadgeBg:        color.NRGBA{R: 0x00, G: 0x00, B: 0x00, A: 0xb8},
 	BadgeFg:        color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff},
 	ChipActiveBg:   color.NRGBA{R: 0xf1, G: 0xf1, B: 0xf1, A: 0xff},
 	ChipActiveText: color.NRGBA{R: 0x0f, G: 0x0f, B: 0x0f, A: 0xff},
 
 	// Backwards compatibility
+	Red:           color.NRGBA{R: 0xc9, G: 0x00, B: 0x28, A: 0xff},
+	SurfaceHover:  color.NRGBA{R: 0x35, G: 0x35, B: 0x35, A: 0xff},
+	SurfaceSelect: color.NRGBA{R: 0x27, G: 0x27, B: 0x27, A: 0xff},
 	Fg:            color.NRGBA{R: 0xf1, G: 0xf1, B: 0xf1, A: 0xff},
 	Subdued:       color.NRGBA{R: 0xaa, G: 0xaa, B: 0xaa, A: 0xff},
-	Accent:        color.NRGBA{R: 0xff, G: 0x00, B: 0x00, A: 0xff},
-	SurfaceSelect: color.NRGBA{R: 0x27, G: 0x27, B: 0x27, A: 0xff},
 }
 
 type rawFontFace struct {
@@ -139,7 +151,7 @@ func NewDarkTheme() (*material.Theme, ThemeColors) {
 	th.Palette = material.Palette{
 		Bg:         DarkColors.Bg,
 		Fg:         DarkColors.Text,
-		ContrastBg: DarkColors.Red,
+		ContrastBg: DarkColors.Action,
 		ContrastFg: DarkColors.Text,
 	}
 	return th, DarkColors

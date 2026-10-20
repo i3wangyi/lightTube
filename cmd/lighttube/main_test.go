@@ -3,11 +3,17 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
+	"time"
 
+	idemo "lighttube/internal/demo"
 	"lighttube/internal/store"
 	"lighttube/internal/yt"
 )
@@ -196,5 +202,232 @@ func TestRunFeed(t *testing.T) {
 	parts := strings.Split(lines[0], "\t")
 	if len(parts) != 4 {
 		t.Fatalf("expected 4 tab-separated fields in feed output, got %d: %q", len(parts), lines[0])
+	}
+}
+
+type fileSnap struct {
+	size   int64
+	mtime  time.Time
+	sha256 [32]byte
+}
+
+func snapshotTree(t *testing.T, root string) map[string]fileSnap {
+	t.Helper()
+	snaps := make(map[string]fileSnap)
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		snaps[rel] = fileSnap{
+			size:   info.Size(),
+			mtime:  info.ModTime(),
+			sha256: sha256.Sum256(data),
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("snapshotting %s: %v", root, err)
+	}
+	return snaps
+}
+
+func TestDemoIsolationLiveXDGDirsUnchanged(t *testing.T) {
+	// (a) Demo never creates or reads a store, account or cookie file under live XDG dirs.
+	canaryData := t.TempDir()
+	canaryCache := t.TempDir()
+
+	// Put canaries at the real paths:
+	// lighttube/settings.json, lighttube/cookies.txt, lighttube/cookies.txt.play, lighttube/accounts/x/cookies.txt
+	dataLt := filepath.Join(canaryData, "lighttube")
+	if err := os.MkdirAll(filepath.Join(dataLt, "accounts", "x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataLt, "settings.json"), []byte(`{"active_account":"live_user"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataLt, "cookies.txt"), []byte("canary-secret-cookie-live"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataLt, "cookies.txt.play"), []byte("canary-secret-play-cookie"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataLt, "accounts", "x", "cookies.txt"), []byte("canary-account-cookie"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// In canaryCache: lighttube/account/home.json
+	cacheLt := filepath.Join(canaryCache, "lighttube")
+	if err := os.MkdirAll(filepath.Join(cacheLt, "account"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cacheLt, "account", "home.json"), []byte(`{"sections":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("MESA_SHADER_CACHE_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", canaryData)
+	t.Setenv("XDG_CACHE_HOME", canaryCache)
+
+	snapDataBefore := snapshotTree(t, dataLt)
+	snapCacheBefore := snapshotTree(t, cacheLt)
+
+	// Chmod the two lighttube dirs to 000 during the run so any open/stat fails.
+	if err := os.Chmod(dataLt, 0000); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(cacheLt, 0000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(dataLt, 0o755)
+		_ = os.Chmod(cacheLt, 0o755)
+	})
+
+	outPNG := filepath.Join(t.TempDir(), "out.png")
+	err := run([]string{"--demo", "--render-png", "100x100", outPNG})
+	if err != nil {
+		t.Fatalf("run with --demo failed: %v", err)
+	}
+
+	// Restore permissions before comparing snapshots
+	_ = os.Chmod(dataLt, 0o755)
+	_ = os.Chmod(cacheLt, 0o755)
+
+	snapDataAfter := snapshotTree(t, dataLt)
+	snapCacheAfter := snapshotTree(t, cacheLt)
+
+	// Compare full snapshots before and after
+	if len(snapDataAfter) != len(snapDataBefore) {
+		t.Fatalf("data directory file count changed: before %d, after %d", len(snapDataBefore), len(snapDataAfter))
+	}
+	for k, b := range snapDataBefore {
+		a, ok := snapDataAfter[k]
+		if !ok {
+			t.Fatalf("canary file %s missing after demo run", k)
+		}
+		if a.size != b.size || a.mtime != b.mtime || a.sha256 != b.sha256 {
+			t.Fatalf("canary file %s modified by demo run (size %d->%d, hash %x->%x)", k, b.size, a.size, b.sha256, a.sha256)
+		}
+	}
+
+	if len(snapCacheAfter) != len(snapCacheBefore) {
+		t.Fatalf("cache directory file count changed: before %d, after %d", len(snapCacheBefore), len(snapCacheAfter))
+	}
+	for k, b := range snapCacheBefore {
+		a, ok := snapCacheAfter[k]
+		if !ok {
+			t.Fatalf("canary cache file %s missing after demo run", k)
+		}
+		if a.size != b.size || a.mtime != b.mtime || a.sha256 != b.sha256 {
+			t.Fatalf("canary cache file %s modified by demo run (size %d->%d, hash %x->%x)", k, b.size, a.size, b.sha256, a.sha256)
+		}
+	}
+}
+
+func TestDemoIsolationBuiltBinaryFromEmptyCWD(t *testing.T) {
+	// (d) Test with built binary: cd $(mktemp -d) && <abs path>/lighttube --demo --render-png 1440x1080 out.png
+	// must succeed with an empty cwd and no repo or scratchpad paths.
+	binDir := t.TempDir()
+	binPath := filepath.Join(binDir, "lighttube")
+
+	buildCmd := exec.Command("go", "build", "-tags", "novulkan", "-o", binPath, ".")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("building binary failed: %v\nOutput: %s", err, string(out))
+	}
+
+	emptyCwd := t.TempDir()
+	outPNG := filepath.Join(emptyCwd, "out.png")
+
+	runCmd := exec.Command(binPath, "--demo", "--render-png", "1440x1080", outPNG)
+	runCmd.Dir = emptyCwd
+	runCmd.Env = os.Environ()
+
+	out, err := runCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("running built binary in empty cwd failed: %v\nOutput: %s", err, string(out))
+	}
+
+	info, err := os.Stat(outPNG)
+	if err != nil || info.Size() == 0 {
+		t.Fatalf("expected non-empty output PNG at %s, err: %v", outPNG, err)
+	}
+}
+
+func TestDemoMissingAssetsFailsWithoutFallback(t *testing.T) {
+	// (e) If embedded assets are missing or broken, --demo exits with a clear error
+	// that names the asset, and never falls back to the real account or network.
+	canaryData := t.TempDir()
+	canaryCache := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", canaryData)
+	t.Setenv("XDG_CACHE_HOME", canaryCache)
+
+	origFS := idemo.AssetFS
+	t.Cleanup(func() {
+		idemo.AssetFS = origFS
+		idemo.ResetCache()
+	})
+
+	// 1. Missing file: map has 11 assets, missing city.jpg
+	missingMap := make(fstest.MapFS)
+	for _, f := range idemo.DemoFiles {
+		if f != "city.jpg" {
+			data, err := fs.ReadFile(origFS, f)
+			if err != nil {
+				t.Fatalf("reading embedded file %s: %v", f, err)
+			}
+			missingMap[f] = &fstest.MapFile{Data: data}
+		}
+	}
+	idemo.AssetFS = missingMap
+	idemo.ResetCache()
+
+	outPNG := filepath.Join(t.TempDir(), "out.png")
+	err := run([]string{"--demo", "--render-png", "100x100", outPNG})
+	if err == nil {
+		t.Fatalf("expected error when city.jpg is missing, got nil")
+	}
+	if !strings.Contains(err.Error(), "city.jpg") {
+		t.Fatalf("expected error to name 'city.jpg', got: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(canaryData, "lighttube")); !os.IsNotExist(statErr) {
+		t.Fatalf("demo mode created lighttube dir under canaryData on missing asset error")
+	}
+
+	// 2. Corrupted JPEG: workshop.jpg has invalid bytes
+	corruptMap := make(fstest.MapFS)
+	for _, f := range idemo.DemoFiles {
+		if f == "workshop.jpg" {
+			corruptMap[f] = &fstest.MapFile{Data: []byte("not a valid jpeg image")}
+		} else {
+			data, err := fs.ReadFile(origFS, f)
+			if err != nil {
+				t.Fatalf("reading embedded file %s: %v", f, err)
+			}
+			corruptMap[f] = &fstest.MapFile{Data: data}
+		}
+	}
+	idemo.AssetFS = corruptMap
+	idemo.ResetCache()
+
+	err = run([]string{"--demo", "--render-png", "100x100", outPNG})
+	if err == nil {
+		t.Fatalf("expected error when workshop.jpg is corrupted, got nil")
+	}
+	if !strings.Contains(err.Error(), "workshop.jpg") {
+		t.Fatalf("expected error to name 'workshop.jpg', got: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(canaryData, "lighttube")); !os.IsNotExist(statErr) {
+		t.Fatalf("demo mode created lighttube dir under canaryData on corrupt asset error")
 	}
 }

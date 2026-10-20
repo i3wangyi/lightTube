@@ -162,7 +162,7 @@ func TestTypeaheadHeadless(t *testing.T) {
 		if q != "golang concurrency" {
 			t.Fatalf("expected search query 'golang concurrency', got %q", q)
 		}
-	default:
+	case <-time.After(1 * time.Second):
 		t.Fatalf("search was not triggered on Enter")
 	}
 

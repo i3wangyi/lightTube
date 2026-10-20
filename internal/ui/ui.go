@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"runtime/pprof"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -40,6 +41,7 @@ import (
 	"gioui.org/widget"
 	"gioui.org/widget/material"
 
+	"lighttube/internal/demo"
 	"lighttube/internal/embed"
 	"lighttube/internal/platform"
 	"lighttube/internal/player"
@@ -71,6 +73,11 @@ type Options struct {
 	GoogleSignInRunner yt.CommandRunner
 	SuggestClient      *yt.SuggestionsClient
 	SuggestClock       yt.Clock
+	Demo               bool
+	DebugSize          string
+	DebugChip          int
+	AmbientOff         bool
+	DebugWatch         bool
 }
 
 // UI manages the Gio window, layout, and event interactions.
@@ -187,6 +194,8 @@ type UI struct {
 	signInGoogleStatus   string
 	googleSignInLauncher *yt.GoogleSignInLauncher
 	accountList          layout.List
+	accountNavSubsClick  widget.Clickable
+	accountNavLibClick   widget.Clickable
 
 	// Mini guide (5 items: Home, Subscriptions, Watch later, History, Account)
 	guideClicks [5]widget.Clickable
@@ -248,52 +257,90 @@ type UI struct {
 	windowTag       event.Tag
 	pasteTag        event.Tag
 	pendingFocusTag event.Tag
+
+	// Phase 10: Four Spaces & Shell
+	spaces             *SpacesManager
+	showingUtility     bool
+	utilityTab         Tab
+	spaceNavClicks     [4]widget.Clickable
+	railLibraryClick   widget.Clickable
+	railSubsClick      widget.Clickable
+	railYouClick       widget.Clickable
+	ambientToggleClick widget.Clickable
+	ambientShape       AmbientShape
+	demo               bool
+	demoData           *DemoData
+	demoLoading        map[string]bool
+	generation         int64
+	generationMu       sync.Mutex
+	heroPrimaryClick   widget.Clickable
+	heroQuietClick     widget.Clickable
+	heroPreviewClick   widget.Clickable
+	topBarLibraryClick widget.Clickable
+	topBarProfileClick widget.Clickable
+	allYouTubeClick    widget.Clickable
+	watchBackBtn       widget.Clickable
+	demoTmpDir         string
+	lastLoggedSecond   int
 }
 
 // New creates and initializes a UI instance with explicit fonts and zero I/O.
 func New(opts Options) *UI {
 	ytClient := opts.YTClient
-	if ytClient == nil {
+	if !opts.Demo && ytClient == nil {
 		ytClient = yt.NewClient()
 	}
 	st := opts.Store
+	var demoTmpDir string
 	if st == nil {
-		st, _ = store.NewDeferred(store.DefaultDataDir())
+		if opts.Demo {
+			tmp, err := os.MkdirTemp("", "lighttube-demo-ui-*")
+			if err == nil {
+				demoTmpDir = tmp
+				st, _ = store.NewDeferred(demoTmpDir)
+			}
+		} else {
+			st, _ = store.NewDeferred(store.DefaultDataDir())
+		}
 	}
 	p := opts.Player
-	if p == nil {
+	if !opts.Demo && p == nil {
 		p = player.New()
 	}
 	thMgr := opts.Thumbs
-	if thMgr == nil {
+	if !opts.Demo && thMgr == nil {
 		thMgr = thumbs.New()
 	}
 
 	th, colors := NewDarkTheme()
 
 	acc := opts.Account
-	if acc == nil {
+	if !opts.Demo && acc == nil {
 		acc = yt.NewAccount()
 	}
 
 	settings := store.DefaultSettings()
 	if opts.Store != nil {
 		settings = opts.Store.Settings()
-		activeAcc := opts.Store.ActiveAccount()
-		if activeAcc.CookieFile != "" {
-			acc.CookieFile = activeAcc.CookieFile
-		}
-		if activeAcc.CacheDir != "" {
-			acc.CacheDir = activeAcc.CacheDir
-		}
-		if activeAcc.BrowserSpec != "" {
-			acc.SetBrowser(activeAcc.BrowserSpec)
-		} else {
-			acc.SetBrowser(settings.BrowserSpec)
+		if !opts.Demo {
+			activeAcc := opts.Store.ActiveAccount()
+			if acc != nil {
+				if activeAcc.CookieFile != "" {
+					acc.CookieFile = activeAcc.CookieFile
+				}
+				if activeAcc.CacheDir != "" {
+					acc.CacheDir = activeAcc.CacheDir
+				}
+				if activeAcc.BrowserSpec != "" {
+					acc.SetBrowser(activeAcc.BrowserSpec)
+				} else {
+					acc.SetBrowser(settings.BrowserSpec)
+				}
+			}
 		}
 	} else if opts.Account != nil && opts.Account.Browser != "" {
 		settings.BrowserSpec = opts.Account.Browser
-	} else {
+	} else if acc != nil {
 		acc.SetBrowser(settings.BrowserSpec)
 	}
 
@@ -345,28 +392,41 @@ func New(opts Options) *UI {
 		imageOps:             make(map[string]paint.ImageOp),
 		windowTag:            new(int),
 		pasteTag:             new(int),
+		spaces:               NewSpacesManager(),
+		demo:                 opts.Demo,
+		demoTmpDir:           demoTmpDir,
+		demoLoading:          make(map[string]bool),
 	}
 
-	suggestClient := opts.SuggestClient
-	if suggestClient == nil {
-		suggestClient = yt.NewSuggestionsClient(nil)
-	}
-	ui.suggestMgr = yt.NewSuggestManagerWithClock(suggestClient, opts.SuggestClock, 150*time.Millisecond, func(query string, suggestions []string) {
-		ui.sendAction(func() {
-			if yt.IsURLQuery(ui.searchEditor.Text()) {
-				ui.suggestVisible = false
-				ui.suggestItems = nil
-				return
-			}
-			ui.suggestItems = suggestions
-			ui.suggestSelected = -1
-			ui.suggestVisible = len(suggestions) > 0
+	if opts.Demo {
+		ui.demoData = LoadDemoData()
+		if ui.demoData != nil {
+			ui.state.Videos = ui.demoData.Videos
+		}
+		go PrefetchDemoImages()
+	} else {
+		suggestClient := opts.SuggestClient
+		if suggestClient == nil {
+			suggestClient = yt.NewSuggestionsClient(nil)
+		}
+		ui.suggestMgr = yt.NewSuggestManagerWithClock(suggestClient, opts.SuggestClock, 150*time.Millisecond, func(query string, suggestions []string) {
+			ui.sendAction(func() {
+				if yt.IsURLQuery(ui.searchEditor.Text()) {
+					ui.suggestVisible = false
+					ui.suggestItems = nil
+					return
+				}
+				ui.suggestItems = suggestions
+				ui.suggestSelected = -1
+				ui.suggestVisible = len(suggestions) > 0
+			})
+			ui.invalidate()
 		})
-		ui.invalidate()
-	})
+	}
 
 	ui.subsChannelsList.Axis = layout.Horizontal
 	ui.accountList.Axis = layout.Vertical
+	ui.chipsList.Axis = layout.Horizontal
 
 	if ui.thumbs != nil {
 		ui.thumbs.SetOnEvict(func(id string) {
@@ -411,7 +471,9 @@ func New(opts Options) *UI {
 
 	ui.accountBrowserEditor.SingleLine = true
 	ui.accountBrowserEditor.Submit = true
-	ui.accountBrowserEditor.SetText(acc.Browser)
+	if acc != nil {
+		ui.accountBrowserEditor.SetText(acc.Browser)
+	}
 
 	ui.addChannelEditor.SingleLine = true
 	ui.addChannelEditor.Submit = true
@@ -453,17 +515,54 @@ func (ui *UI) writeHeapProfile() {
 }
 
 func Run(opts Options) error {
+	if opts.Demo {
+		if err := demo.ValidateAssets(); err != nil {
+			return fmt.Errorf("demo assets error: %w", err)
+		}
+	}
 	app.ID = "lighttube"
 
 	ui := New(opts)
+	defer func() {
+		if ui.demoTmpDir != "" {
+			_ = os.RemoveAll(ui.demoTmpDir)
+		}
+	}()
 	if ui.window == nil {
 		ui.window = new(app.Window)
 	}
 
+	winW := 1120
+	winH := 720
+	minW := 360
+	minH := 400
+	if opts.DebugSize != "" {
+		parts := strings.Split(opts.DebugSize, "x")
+		if len(parts) == 2 {
+			if w, err := strconv.Atoi(parts[0]); err == nil && w > 0 {
+				winW = w
+				if w < minW {
+					minW = w
+				}
+			}
+			if h, err := strconv.Atoi(parts[1]); err == nil && h > 0 {
+				winH = h
+				if h < minH {
+					minH = h
+				}
+			}
+		}
+	}
+
+	title := "lightTube"
+	if opts.DebugSize != "" {
+		title = "lightTube-test"
+	}
+
 	ui.window.Option(
-		app.Title("lightTube"),
-		app.Size(unit.Dp(1120), unit.Dp(720)),
-		app.MinSize(unit.Dp(720), unit.Dp(480)),
+		app.Title(title),
+		app.Size(unit.Dp(winW), unit.Dp(winH)),
+		app.MinSize(unit.Dp(minW), unit.Dp(minH)),
 	)
 
 	sigCh := make(chan os.Signal, 1)
@@ -616,6 +715,10 @@ func (ui *UI) eventLoop() error {
 							}()
 						}
 					}
+					if ui.debug && int(st.TimePos) > 0 && int(st.TimePos) != ui.lastLoggedSecond {
+						ui.lastLoggedSecond = int(st.TimePos)
+						fmt.Fprintf(os.Stderr, "playback-pos=%d\n", int(st.TimePos))
+					}
 				}
 			}
 
@@ -645,6 +748,9 @@ func (ui *UI) onStoreLoaded() {
 		ui.account.SetBrowser(ui.settings.BrowserSpec)
 	}
 	ui.state.Subscriptions = ui.store.Subscriptions()
+	if ui.demo {
+		return
+	}
 	if ui.state.CurrentTab == TabHome {
 		if ui.account != nil && ui.account.SignedIn() {
 			cached, _ := ui.account.Cached(yt.FeedHome)
@@ -697,6 +803,7 @@ func (ui *UI) refreshAccountFeed(kind yt.FeedKind) {
 	ui.refreshingFeeds[kind] = true
 	ui.refreshMu.Unlock()
 
+	gen := ui.currentGen()
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -706,6 +813,10 @@ func (ui *UI) refreshAccountFeed(kind yt.FeedKind) {
 			ui.refreshMu.Lock()
 			delete(ui.refreshingFeeds, kind)
 			ui.refreshMu.Unlock()
+
+			if gen != ui.currentGen() {
+				return
+			}
 
 			if err != nil {
 				cleanErr := yt.SanitizeErrorOutput(err.Error())
@@ -782,6 +893,7 @@ func (ui *UI) signInAccount() {
 }
 
 func (ui *UI) signOutAccount() {
+	ui.bumpGen()
 	if ui.account == nil {
 		return
 	}
@@ -795,6 +907,7 @@ func (ui *UI) signOutAccount() {
 }
 
 func (ui *UI) switchAccount(acc store.AccountConfig) {
+	ui.bumpGen()
 	if ui.store == nil {
 		return
 	}
@@ -1141,12 +1254,33 @@ func (ui *UI) search(query string) {
 	ui.dropThumbnails()
 	ui.state.CurrentTab = TabSearch
 	ui.state.Status = fmt.Sprintf("Searching %q…", query)
+
+	if ui.demo {
+		if ui.demoData != nil {
+			q := strings.ToLower(query)
+			var matched []yt.Video
+			for _, v := range ui.demoData.Videos {
+				if strings.Contains(strings.ToLower(v.Title), q) || strings.Contains(strings.ToLower(v.Channel), q) {
+					matched = append(matched, v)
+				}
+			}
+			ui.state.SetVideos(matched)
+			ui.state.Status = ""
+		}
+		ui.invalidate()
+		return
+	}
+
+	gen := ui.currentGen()
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
 		videos, err := ui.ytClient.Search(ctx, query)
 		ui.sendAction(func() {
+			if gen != ui.currentGen() {
+				return
+			}
 			if err != nil {
 				ui.state.Status = "Search error: " + err.Error()
 				return
@@ -1175,12 +1309,16 @@ func (ui *UI) loadMergedFeed() {
 		}
 	}
 
+	gen := ui.currentGen()
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
 		videos, err := ui.ytClient.MergedFeed(ctx, channelIDs)
 		ui.sendAction(func() {
+			if gen != ui.currentGen() {
+				return
+			}
 			if err != nil {
 				ui.state.Status = "Feed error: " + err.Error()
 				return
@@ -1401,7 +1539,7 @@ func (ui *UI) dropThumbnails() {
 }
 
 func (ui *UI) requestThumbnail(vid string) {
-	if vid == "" {
+	if vid == "" || ui.thumbs == nil {
 		return
 	}
 	if _, ok := ui.thumbs.Get(vid); ok {
@@ -1465,6 +1603,10 @@ func (ui *UI) layout(gtx layout.Context) layout.Dimensions {
 		key.Filter{Name: "3", Required: key.ModShortcut},
 		key.Filter{Name: "4", Required: key.ModShortcut},
 		key.Filter{Name: "5", Required: key.ModShortcut},
+		key.Filter{Name: "1", Required: key.ModAlt},
+		key.Filter{Name: "2", Required: key.ModAlt},
+		key.Filter{Name: "3", Required: key.ModAlt},
+		key.Filter{Name: "4", Required: key.ModAlt},
 		key.Filter{Name: "L", Required: key.ModShortcut},
 		key.Filter{Name: "l", Required: key.ModShortcut},
 		key.Filter{Name: "V", Required: key.ModShortcut},
@@ -1544,6 +1686,9 @@ func (ui *UI) layout(gtx layout.Context) layout.Dimensions {
 			if ui.state.CurrentTab == TabWatch {
 				action, tab, delta := ResolveWatchKeyAction(ke.Name, ke.Modifiers, isEditorFocused)
 				switch action {
+				case ActionSwitchSpace:
+					ui.closeWatchPage()
+					ui.switchSpace(SpaceID(tab))
 				case ActionSwitchTab:
 					ui.closeWatchPage()
 					ui.switchTab(tab)
@@ -1579,6 +1724,8 @@ func (ui *UI) layout(gtx layout.Context) layout.Dimensions {
 			} else {
 				action, tab, delta := ResolveKeyAction(ke.Name, ke.Modifiers, isEditorFocused)
 				switch action {
+				case ActionSwitchSpace:
+					ui.switchSpace(SpaceID(tab))
 				case ActionSwitchTab:
 					ui.switchTab(tab)
 				case ActionFocusSearch:
@@ -1605,26 +1752,58 @@ func (ui *UI) layout(gtx layout.Context) layout.Dimensions {
 
 	return layout.Stack{}.Layout(gtx,
 		layout.Stacked(func(gtx layout.Context) layout.Dimensions {
-			if ui.state.CurrentTab == TabWatch {
-				if ui.watchFullscreen {
+			if ui.watchFullscreen {
+				return ui.layoutWatchPage(gtx)
+			}
+
+			winW := gtx.Constraints.Max.X
+			isMobile := winW < gtx.Dp(600)
+
+			contentBody := func(gtx layout.Context) layout.Dimensions {
+				if ui.state.CurrentTab == TabWatch {
 					return ui.layoutWatchPage(gtx)
 				}
+				if ui.showingUtility || ui.state.CurrentTab != TabHome {
+					return ui.layoutMainArea(gtx)
+				}
 				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-					layout.Rigid(ui.layoutTopBar),
-					layout.Flexed(1, ui.layoutWatchPage),
-					layout.Rigid(ui.layoutStatusBar),
+					layout.Rigid(ui.layoutPerSpaceHeading),
+					layout.Rigid(ui.layoutChips),
+					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+						switch ui.spaces.ActiveSpace {
+						case SpaceWatch:
+							return ui.layoutWatchSpace(gtx)
+						case SpaceShorts:
+							return ui.layoutPlaceholderScreen(gtx, "Shorts")
+						case SpacePodcasts:
+							return ui.layoutPlaceholderScreen(gtx, "Podcasts")
+						case SpaceMusic:
+							return ui.layoutPlaceholderScreen(gtx, "Music")
+						default:
+							return ui.layoutWatchSpace(gtx)
+						}
+					}),
 				)
 			}
 
-			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-				layout.Rigid(ui.layoutTopBar),
+			if isMobile {
+				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+					layout.Rigid(ui.layoutTopBar),
+					layout.Flexed(1, contentBody),
+					layout.Rigid(ui.layoutBottomBar),
+				)
+			}
+
+			// Desktop / Tablet shell: Rail (left) + Right Column
+			return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
+				layout.Rigid(ui.layoutRail),
 				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-					return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
-						layout.Rigid(ui.layoutMiniGuide),
-						layout.Flexed(1, ui.layoutMainArea),
+					return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+						layout.Rigid(ui.layoutTopBar),
+						layout.Flexed(1, contentBody),
+						layout.Rigid(ui.layoutStatusBar),
 					)
 				}),
-				layout.Rigid(ui.layoutStatusBar),
 			)
 		}),
 		layout.Expanded(func(gtx layout.Context) layout.Dimensions {
@@ -1686,9 +1865,21 @@ func (ui *UI) layoutTopBar(gtx layout.Context) layout.Dimensions {
 	h := gtx.Dp(40)
 	showChip := winW >= gtx.Dp(760)
 
+	scopeLabel := SearchScopeLabel(ui.spaces.ActiveSpace)
+	if ui.showingUtility {
+		scopeLabel = "Library"
+	}
+
+	isNarrow := winW < gtx.Dp(600)
+
+	padX := unit.Dp(16)
+	if isNarrow {
+		padX = unit.Dp(12)
+	}
+
 	return layout.Inset{
-		Left:   unit.Dp(16),
-		Right:  unit.Dp(16),
+		Left:   padX,
+		Right:  padX,
 		Top:    unit.Dp(8),
 		Bottom: unit.Dp(8),
 	}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
@@ -1696,39 +1887,47 @@ func (ui *UI) layoutTopBar(gtx layout.Context) layout.Dimensions {
 			Axis:      layout.Horizontal,
 			Alignment: layout.Middle,
 		}.Layout(gtx,
-			// 1. Logo rigid
+			// 1. Left element: Back button when on TabWatch, Brand mark in mobile (<600dp), Space scope label on wide desktop (>=760dp)
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				return ui.logoClick.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-					if ui.logoClick.Hovered() {
-						pointer.CursorPointer.Add(gtx.Ops)
-					}
-					return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
-						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-							w := gtx.Dp(28)
-							lh := gtx.Dp(20)
-							rect := image.Rect(0, 0, w, lh)
-							rrect := clip.UniformRRect(rect, gtx.Dp(6))
-							paint.FillShape(gtx.Ops, ui.colors.Red, rrect.Op(gtx.Ops))
-							drawPlayTriangle(gtx, rect, color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff})
-							return layout.Dimensions{Size: image.Pt(w, lh)}
-						}),
-						layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
-						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-							lbl := material.Label(ui.th, unit.Sp(20), "lightTube")
-							lbl.Color = ui.colors.Text
-							lbl.Font.Weight = font.Medium
-							return lbl.Layout(gtx)
-						}),
-					)
-				})
+				if ui.state.CurrentTab == TabWatch {
+					return layout.Inset{Right: unit.Dp(10)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						if ui.watchBackBtn.Clicked(gtx) {
+							ui.closeWatchPage()
+						}
+						if ui.watchBackBtn.Hovered() {
+							pointer.CursorPointer.Add(gtx.Ops)
+						}
+						btn := material.Button(ui.th, &ui.watchBackBtn, "← Back")
+						btn.Background = ui.colors.Surface
+						btn.Color = ui.colors.Text
+						btn.CornerRadius = unit.Dp(16)
+						btn.Inset = layout.Inset{Top: unit.Dp(6), Bottom: unit.Dp(6), Left: unit.Dp(12), Right: unit.Dp(12)}
+						return btn.Layout(gtx)
+					})
+				}
+				if isNarrow {
+					return layout.Inset{Right: unit.Dp(10)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						return ui.logoClick.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							if ui.logoClick.Hovered() {
+								pointer.CursorPointer.Add(gtx.Ops)
+							}
+							return ui.drawBrandMark(gtx)
+						})
+					})
+				}
+				if !showChip {
+					return layout.Dimensions{}
+				}
+				lbl := material.Label(ui.th, unit.Sp(14), scopeLabel)
+				lbl.Color = ui.colors.Text2
+				lbl.Font.Weight = font.Medium
+				return layout.Inset{Left: unit.Dp(8), Right: unit.Dp(16)}.Layout(gtx, lbl.Layout)
 			}),
 
-			layout.Rigid(layout.Spacer{Width: unit.Dp(16)}.Layout),
-
-			// 2. Search flexed (min 200, max 640, centered in free space)
+			// 2. Search flexed (min 140, max 640, centered in free space)
 			layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 				freeW := gtx.Constraints.Max.X
-				minW := gtx.Dp(200)
+				minW := gtx.Dp(140)
 				maxW := gtx.Dp(640)
 				pillW := maxW
 				if freeW < pillW {
@@ -1746,12 +1945,60 @@ func (ui *UI) layoutTopBar(gtx layout.Context) layout.Dimensions {
 				})
 			}),
 
-			// 3. Policy chip rigid (hidden when window < 760 dp)
+			// 3. Right element: Library + Profile buttons in mobile (<600dp), Profile circle on desktop
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				if isNarrow {
+					return layout.Inset{Left: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+							// Library button
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								return ui.topBarLibraryClick.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+									if ui.topBarLibraryClick.Hovered() {
+										pointer.CursorPointer.Add(gtx.Ops)
+									}
+									if ui.topBarLibraryClick.Clicked(gtx) {
+										ui.openUtility(TabWatchLater)
+									}
+									sz := gtx.Dp(32)
+									r := clip.UniformRRect(image.Rect(0, 0, sz, sz), sz/2)
+									paint.FillShape(gtx.Ops, ui.colors.Raised, r.Op(gtx.Ops))
+									return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+										iconBox := image.Rect(0, 0, gtx.Dp(16), gtx.Dp(16))
+										drawLibraryIcon(gtx, iconBox, ui.colors.Text)
+										return layout.Dimensions{Size: iconBox.Size()}
+									})
+								})
+							}),
+							layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
+							// Profile / You button
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								return ui.topBarProfileClick.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+									if ui.topBarProfileClick.Hovered() {
+										pointer.CursorPointer.Add(gtx.Ops)
+									}
+									if ui.topBarProfileClick.Clicked(gtx) {
+										ui.openUtility(TabAccount)
+									}
+									return layoutAvatar(gtx, ui.th, "", "You", 32)
+								})
+							}),
+						)
+					})
+				}
 				if !showChip {
 					return layout.Dimensions{}
 				}
-				return layout.Inset{Left: unit.Dp(16)}.Layout(gtx, ui.layoutPolicyLabel)
+				return layout.Inset{Left: unit.Dp(16)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+					return ui.topBarProfileClick.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						if ui.topBarProfileClick.Hovered() {
+							pointer.CursorPointer.Add(gtx.Ops)
+						}
+						if ui.topBarProfileClick.Clicked(gtx) {
+							ui.openUtility(TabAccount)
+						}
+						return layoutAvatar(gtx, ui.th, "", "You", 32)
+					})
+				})
 			}),
 		)
 	})
@@ -1833,7 +2080,11 @@ func (ui *UI) layoutSearchBox(gtx layout.Context, pillW, h int) layout.Dimension
 				Alignment: layout.Middle,
 			}.Layout(gtx,
 				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-					ed := material.Editor(ui.th, &ui.searchEditor, "Search")
+					placeholder := SearchPlaceholder(ui.spaces.ActiveSpace)
+					if ui.showingUtility {
+						placeholder = "Search YouTube"
+					}
+					ed := material.Editor(ui.th, &ui.searchEditor, placeholder)
 					ed.Color = ui.colors.Text
 					ed.HintColor = ui.colors.Text2
 					ed.TextSize = unit.Sp(16)
@@ -2387,14 +2638,27 @@ func (ui *UI) layoutCardThumbnail(gtx layout.Context, v yt.Video, w, h int, isSe
 	if isHovered && ui.hoverVideoID == v.ID && len(ui.hoverFrames) > 0 {
 		imgOp = ui.hoverOps[ui.hoverFrameIdx]
 		hasImg = true
-	} else if img, ok := ui.thumbs.Get(v.ID); ok && img != nil {
-		op, cached := ui.imageOps[v.ID]
-		if !cached {
-			op = paint.NewImageOp(img)
-			ui.imageOps[v.ID] = op
+	} else if ui.demo {
+		filename := demoFilenameForID(v.ID)
+		if img, ok := ui.getDemoImage(filename); ok && img != nil {
+			op, cached := ui.imageOps[v.ID]
+			if !cached {
+				op = paint.NewImageOp(img)
+				ui.imageOps[v.ID] = op
+			}
+			imgOp = op
+			hasImg = true
 		}
-		imgOp = op
-		hasImg = true
+	} else if ui.thumbs != nil {
+		if img, ok := ui.thumbs.Get(v.ID); ok && img != nil {
+			op, cached := ui.imageOps[v.ID]
+			if !cached {
+				op = paint.NewImageOp(img)
+				ui.imageOps[v.ID] = op
+			}
+			imgOp = op
+			hasImg = true
+		}
 	} else {
 		delete(ui.imageOps, v.ID)
 	}
@@ -2423,7 +2687,7 @@ func (ui *UI) layoutCardThumbnail(gtx layout.Context, v yt.Video, w, h int, isSe
 					progW = w
 				}
 				progRect := clip.Rect(image.Rect(0, h-progH, progW, h))
-				paint.FillShape(gtx.Ops, ui.colors.Red, progRect.Op())
+				paint.FillShape(gtx.Ops, ui.colors.Accent, progRect.Op())
 			}
 
 			// Selected item outline: 2 dp text outline around the thumbnail
@@ -2808,7 +3072,7 @@ func (ui *UI) layoutSubscriptionsView(gtx layout.Context) layout.Dimensions {
 							layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
 							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 								btn := material.Button(ui.th, &ui.addChannelBtn, "Subscribe")
-								btn.Background = ui.colors.Red
+								btn.Background = ui.colors.Action
 								btn.Color = color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff}
 								btn.CornerRadius = unit.Dp(18)
 								btn.Inset = layout.Inset{Top: unit.Dp(8), Bottom: unit.Dp(8), Left: unit.Dp(16), Right: unit.Dp(16)}
@@ -3051,7 +3315,13 @@ func (ui *UI) layoutSuggestionsDropdown(gtx layout.Context) layout.Dimensions {
 	top := gtx.Dp(52)
 
 	rowH := gtx.Dp(40)
+	query := strings.TrimSpace(ui.searchEditor.Text())
+	qLower := strings.ToLower(query)
+	hasAllYT := query != ""
 	totalH := rowH*n + gtx.Dp(16)
+	if hasAllYT {
+		totalH += rowH + gtx.Dp(1)
+	}
 
 	dropRect := image.Rect(left, top, left+pillW, top+totalH)
 	bgRRect := clip.UniformRRect(dropRect, gtx.Dp(12))
@@ -3060,9 +3330,6 @@ func (ui *UI) layoutSuggestionsDropdown(gtx layout.Context) layout.Dimensions {
 		Path:  bgRRect.Path(gtx.Ops),
 		Width: float32(gtx.Dp(1)),
 	}.Op())
-
-	query := strings.TrimSpace(ui.searchEditor.Text())
-	qLower := strings.ToLower(query)
 
 	for i := 0; i < n; i++ {
 		item := ui.suggestItems[i]
@@ -3139,6 +3406,63 @@ func (ui *UI) layoutSuggestionsDropdown(gtx layout.Context) layout.Dimensions {
 		})
 		offset.Pop()
 		rowArea.Pop()
+	}
+
+	if hasAllYT {
+		divY := top + gtx.Dp(8) + n*rowH
+		divRect := image.Rect(left+gtx.Dp(8), divY, left+pillW-gtx.Dp(8), divY+gtx.Dp(1))
+		paint.FillShape(gtx.Ops, ui.colors.Border, clip.Rect(divRect).Op())
+
+		allYTRowTop := divY + gtx.Dp(1)
+		allYTRowRect := image.Rect(left+gtx.Dp(4), allYTRowTop, left+pillW-gtx.Dp(4), allYTRowTop+rowH)
+		allYTRowRRect := clip.UniformRRect(allYTRowRect, gtx.Dp(8))
+
+		if ui.allYouTubeClick.Clicked(gtx) {
+			ui.suggestVisible = false
+			ui.suggestSelected = -1
+			ui.search(query)
+			return layout.Dimensions{}
+		}
+
+		if ui.allYouTubeClick.Hovered() {
+			paint.FillShape(gtx.Ops, ui.colors.SurfaceHover, allYTRowRRect.Op(gtx.Ops))
+			pointer.CursorPointer.Add(gtx.Ops)
+		}
+
+		cArea := clip.Rect(allYTRowRect).Push(gtx.Ops)
+		ui.allYouTubeClick.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			return layout.Dimensions{Size: allYTRowRect.Size()}
+		})
+		cArea.Pop()
+
+		offset := op.Offset(allYTRowRect.Min).Push(gtx.Ops)
+		rowGtx := gtx
+		rowGtx.Constraints = layout.Exact(allYTRowRect.Size())
+		layout.Inset{Left: unit.Dp(12), Right: unit.Dp(12)}.Layout(rowGtx, func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					badgeW := gtx.Dp(78)
+					badgeH := gtx.Dp(22)
+					r := clip.UniformRRect(image.Rect(0, 0, badgeW, badgeH), gtx.Dp(4))
+					paint.FillShape(gtx.Ops, ui.colors.Raised, r.Op(gtx.Ops))
+					badgeGtx := gtx
+					badgeGtx.Constraints = layout.Exact(image.Pt(badgeW, badgeH))
+					return layout.Center.Layout(badgeGtx, func(gtx layout.Context) layout.Dimensions {
+						lbl := material.Label(ui.th, unit.Sp(10), "All YouTube")
+						lbl.Color = ui.colors.Text2
+						lbl.Font.Weight = font.Bold
+						return lbl.Layout(gtx)
+					})
+				}),
+				layout.Rigid(layout.Spacer{Width: unit.Dp(10)}.Layout),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					lbl := material.Label(ui.th, unit.Sp(13), fmt.Sprintf("Search across all YouTube for %q", query))
+					lbl.Color = ui.colors.Text
+					return lbl.Layout(gtx)
+				}),
+			)
+		})
+		offset.Pop()
 	}
 
 	return layout.Dimensions{}
@@ -3548,6 +3872,64 @@ func (ui *UI) layoutAccountView(gtx layout.Context) layout.Dimensions {
 					lbl.Color = ui.colors.Text
 					return lbl.Layout(gtx)
 				}),
+				layout.Rigid(layout.Spacer{Height: unit.Dp(16)}.Layout),
+
+				// Quick navigation row to Subscriptions and Library
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					if ui.accountNavSubsClick.Clicked(gtx) {
+						ui.openUtility(TabSubscriptions)
+					}
+					if ui.accountNavLibClick.Clicked(gtx) {
+						ui.openUtility(TabWatchLater)
+					}
+					return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							return ui.accountNavSubsClick.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+								if ui.accountNavSubsClick.Hovered() {
+									pointer.CursorPointer.Add(gtx.Ops)
+								}
+								return layout.Background{}.Layout(gtx,
+									func(gtx layout.Context) layout.Dimensions {
+										r := clip.UniformRRect(image.Rectangle{Max: gtx.Constraints.Min}, gtx.Dp(8))
+										paint.FillShape(gtx.Ops, ui.colors.Raised, r.Op(gtx.Ops))
+										return layout.Dimensions{Size: gtx.Constraints.Min}
+									},
+									func(gtx layout.Context) layout.Dimensions {
+										return layout.Inset{Top: unit.Dp(8), Bottom: unit.Dp(8), Left: unit.Dp(14), Right: unit.Dp(14)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+											lbl := material.Label(ui.th, unit.Sp(13), "Subscriptions")
+											lbl.Color = ui.colors.Text
+											lbl.Font.Weight = font.Medium
+											return lbl.Layout(gtx)
+										})
+									},
+								)
+							})
+						}),
+						layout.Rigid(layout.Spacer{Width: unit.Dp(10)}.Layout),
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							return ui.accountNavLibClick.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+								if ui.accountNavLibClick.Hovered() {
+									pointer.CursorPointer.Add(gtx.Ops)
+								}
+								return layout.Background{}.Layout(gtx,
+									func(gtx layout.Context) layout.Dimensions {
+										r := clip.UniformRRect(image.Rectangle{Max: gtx.Constraints.Min}, gtx.Dp(8))
+										paint.FillShape(gtx.Ops, ui.colors.Raised, r.Op(gtx.Ops))
+										return layout.Dimensions{Size: gtx.Constraints.Min}
+									},
+									func(gtx layout.Context) layout.Dimensions {
+										return layout.Inset{Top: unit.Dp(8), Bottom: unit.Dp(8), Left: unit.Dp(14), Right: unit.Dp(14)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+											lbl := material.Label(ui.th, unit.Sp(13), "Your Library")
+											lbl.Color = ui.colors.Text
+											lbl.Font.Weight = font.Medium
+											return lbl.Layout(gtx)
+										})
+									},
+								)
+							})
+						}),
+					)
+				}),
 				layout.Rigid(layout.Spacer{Height: unit.Dp(20)}.Layout),
 
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -3637,7 +4019,7 @@ func (ui *UI) layoutAccountsList(gtx layout.Context) layout.Dimensions {
 										r := clip.UniformRRect(image.Rect(0, 0, sz, sz), gtx.Dp(18))
 										col := ui.colors.SurfaceHover
 										if isActive {
-											col = ui.colors.Red
+											col = ui.colors.Accent
 										}
 										paint.FillShape(gtx.Ops, col, r.Op(gtx.Ops))
 										return layout.Dimensions{Size: image.Pt(sz, sz)}
@@ -3727,7 +4109,7 @@ func (ui *UI) layoutAccountsList(gtx layout.Context) layout.Dimensions {
 										}
 										btn := material.Button(ui.th, rm, "Remove")
 										btn.Background = ui.colors.SurfaceHover
-										btn.Color = ui.colors.Red
+										btn.Color = ui.colors.Action
 										btn.CornerRadius = unit.Dp(14)
 										btn.Inset = layout.Inset{Top: unit.Dp(4), Bottom: unit.Dp(4), Left: unit.Dp(10), Right: unit.Dp(10)}
 										return btn.Layout(gtx)
@@ -3819,7 +4201,7 @@ func (ui *UI) layoutAddAccountPanel(gtx layout.Context) layout.Dimensions {
 									pointer.CursorPointer.Add(gtx.Ops)
 								}
 								btn := material.Button(ui.th, &ui.signInGoogleBtn, "Sign in with Google")
-								btn.Background = ui.colors.Red
+								btn.Background = ui.colors.Action
 								btn.Color = color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff}
 								btn.CornerRadius = unit.Dp(16)
 								btn.Inset = layout.Inset{Top: unit.Dp(8), Bottom: unit.Dp(8), Left: unit.Dp(16), Right: unit.Dp(16)}
@@ -3833,7 +4215,7 @@ func (ui *UI) layoutAddAccountPanel(gtx layout.Context) layout.Dimensions {
 								lbl := material.Label(ui.th, unit.Sp(13), ui.signInGoogleStatus)
 								lbl.Color = ui.colors.Text2
 								if strings.HasPrefix(ui.signInGoogleStatus, "Error") {
-									lbl.Color = ui.colors.Red
+									lbl.Color = ui.colors.Accent
 								}
 								return lbl.Layout(gtx)
 							}),
@@ -4077,6 +4459,10 @@ func (ui *UI) openWatchPage(v yt.Video) {
 	}
 	ui.upNextVideos = upNext
 
+	if ui.demo {
+		return
+	}
+
 	_ = ui.store.AddHistory(v)
 	ui.state.Status = ""
 
@@ -4302,6 +4688,13 @@ func (ui *UI) layoutVideoArea(gtx layout.Context, w, h int) layout.Dimensions {
 	gtx.Constraints.Min = box
 	gtx.Constraints.Max = box
 
+	if ui.demo {
+		paint.FillShape(gtx.Ops, ui.colors.Surface, clip.Rect(image.Rect(0, 0, w, h)).Op())
+		return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			return ui.layoutPillBadge(gtx, "Playback disabled in demo", false)
+		})
+	}
+
 	area := clip.Rect(image.Rect(0, 0, w, h)).Push(gtx.Ops)
 	event.Op(gtx.Ops, &ui.watchVideoTag)
 	area.Pop()
@@ -4387,11 +4780,11 @@ func (ui *UI) layoutControlsBar(gtx layout.Context, widthPx int) layout.Dimensio
 	}
 	playedW := int(frac * float64(widthPx))
 	if playedW > 0 {
-		paint.FillShape(gtx.Ops, ui.colors.Red, clip.Rect(image.Rect(0, progY, playedW, progY+progLineH)).Op())
+		paint.FillShape(gtx.Ops, ui.colors.Accent, clip.Rect(image.Rect(0, progY, playedW, progY+progLineH)).Op())
 	}
 	handleR := gtx.Dp(5)
 	handleRect := image.Rect(playedW-handleR, progY+progLineH/2-handleR, playedW+handleR, progY+progLineH/2+handleR)
-	paint.FillShape(gtx.Ops, ui.colors.Red, clip.Ellipse(handleRect).Op(gtx.Ops))
+	paint.FillShape(gtx.Ops, ui.colors.Accent, clip.Ellipse(handleRect).Op(gtx.Ops))
 
 	if ui.watchPlayPauseClick.Clicked(gtx) {
 		if ui.embedPlayer != nil {
@@ -4519,7 +4912,7 @@ func (ui *UI) layoutVideoDetails(gtx layout.Context, v yt.Video, widthPx int) la
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					isSub := ui.isSubscribed(v.ChannelID)
 					label := "Subscribe"
-					btnBg := ui.colors.Red
+					btnBg := ui.colors.Action
 					btnFg := color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff}
 					if isSub {
 						label = "Subscribed"

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	idemo "lighttube/internal/demo"
 	"lighttube/internal/embed"
 	"lighttube/internal/player"
 	"lighttube/internal/store"
@@ -66,7 +67,9 @@ func run(args []string) error {
 	if os.Getenv("GOMEMLIMIT") == "" {
 		rdebug.SetMemoryLimit(96 << 20)
 	}
+	var demo bool
 	var debug bool
+	var debugSize string
 	var search string
 	var externalPlayer bool
 	var debugPlay string
@@ -77,9 +80,44 @@ func run(args []string) error {
 	var debugPlaylist bool
 	var debugHover int = -1
 	var debugHoverSeconds int
+	var renderPNG bool
+	var renderPNGSize string
+	var renderPNGOut string
+	var debugChip int = -1
+	var ambientOff bool
+	var debugWatch bool
 	var filtered []string
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
+		if arg == "--demo" {
+			demo = true
+			continue
+		}
+		if arg == "--render-png" && i+2 < len(args) {
+			renderPNG = true
+			renderPNGSize = args[i+1]
+			renderPNGOut = args[i+2]
+			i += 2
+			continue
+		}
+		if (arg == "--debug-chip" || arg == "--chip") && i+1 < len(args) {
+			debugChip, _ = strconv.Atoi(args[i+1])
+			i++
+			continue
+		}
+		if arg == "--ambient-off" || arg == "--no-ambient" {
+			ambientOff = true
+			continue
+		}
+		if arg == "--debug-watch" {
+			debugWatch = true
+			continue
+		}
+		if arg == "--debug-size" && i+1 < len(args) {
+			debugSize = args[i+1]
+			i++
+			continue
+		}
 		if arg == "--debug" {
 			debug = true
 			continue
@@ -137,42 +175,84 @@ func run(args []string) error {
 
 	// For GUI execution (no subcommands), do not read store files before the first frame.
 	if len(filtered) == 0 {
-		st, err := store.NewDeferred(store.DefaultDataDir())
-		if err != nil {
-			return fmt.Errorf("initializing store: %w", err)
+		var st *store.Store
+		var demoTmpDir string
+		if demo {
+			if err := idemo.ValidateAssets(); err != nil {
+				return fmt.Errorf("demo assets error: %w", err)
+			}
+			tmp, err := os.MkdirTemp("", "lighttube-demo-*")
+			if err != nil {
+				return fmt.Errorf("creating demo temporary store dir: %w", err)
+			}
+			demoTmpDir = tmp
+			defer os.RemoveAll(demoTmpDir)
+			st, err = store.NewDeferred(demoTmpDir)
+			if err != nil {
+				return fmt.Errorf("initializing demo store: %w", err)
+			}
+		} else {
+			var err error
+			st, err = store.NewDeferred(store.DefaultDataDir())
+			if err != nil {
+				return fmt.Errorf("initializing store: %w", err)
+			}
+		}
+
+		var hoverPtr *int
+		if debugHover >= 0 {
+			hoverPtr = &debugHover
+		}
+
+		var p *player.Player
+		var acc *yt.Account
+		var th *thumbs.Manager
+		var ytCli *yt.Client
+		if !demo {
+			p = player.New()
+			acc = yt.NewAccount()
+			th = thumbs.New()
+			ytCli = yt.NewClient()
+		}
+
+		opts := ui.Options{
+			YTClient:          ytCli,
+			Store:             st,
+			Player:            p,
+			Account:           acc,
+			Thumbs:            th,
+			Debug:             debug,
+			StartTime:         processStart,
+			Search:            search,
+			ExternalPlayer:    externalPlayer,
+			DebugPlay:         debugPlay,
+			DebugPlaySeconds:  debugPlaySeconds,
+			DebugTab:          debugTab,
+			DebugHover:        hoverPtr,
+			DebugHoverSeconds: debugHoverSeconds,
+			DebugHeap:         debugHeap,
+			DebugSearch:       debugSearch,
+			DebugPlaylist:     debugPlaylist,
+			Demo:              demo,
+			DebugSize:         debugSize,
+			DebugChip:         debugChip,
+			AmbientOff:        ambientOff,
+			DebugWatch:        debugWatch,
+		}
+
+		if renderPNG {
+			return ui.RenderPNG(opts, renderPNGSize, renderPNGOut)
 		}
 
 		env := &appEnv{
-			ytClient: yt.NewClient(),
+			ytClient: ytCli,
 			store:    st,
-			account:  yt.NewAccount(),
+			account:  acc,
 			stdout:   os.Stdout,
 			stderr:   os.Stderr,
 			stdin:    os.Stdin,
 			guiRunner: func(e *appEnv) error {
-				var hoverPtr *int
-				if debugHover >= 0 {
-					hoverPtr = &debugHover
-				}
-				return ui.Run(ui.Options{
-					YTClient:          e.ytClient,
-					Store:             e.store,
-					Player:            player.New(),
-					Account:           e.account,
-					Thumbs:            thumbs.New(),
-					Debug:             debug,
-					StartTime:         processStart,
-					Search:            search,
-					ExternalPlayer:    externalPlayer,
-					DebugPlay:         debugPlay,
-					DebugPlaySeconds:  debugPlaySeconds,
-					DebugTab:          debugTab,
-					DebugHover:        hoverPtr,
-					DebugHoverSeconds: debugHoverSeconds,
-					DebugHeap:         debugHeap,
-					DebugSearch:       debugSearch,
-					DebugPlaylist:     debugPlaylist,
-				})
+				return ui.Run(opts)
 			},
 		}
 		return runWithEnv(env, filtered)
