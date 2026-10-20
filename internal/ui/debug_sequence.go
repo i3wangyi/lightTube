@@ -56,12 +56,24 @@ func (ui *UI) advanceDebugSequence(now time.Time) string {
 	} else {
 		var space SpaceID
 		switch kind {
+		case "watch":
+			space = SpaceWatch
+		case "shorts":
+			space = SpaceShorts
 		case "music":
 			space = SpaceMusic
 		case "podcasts":
 			space = SpacePodcasts
 		default:
 			return fail("unknown space")
+		}
+		scrollRows := float32(0)
+		if value, ok := strings.CutPrefix(action, "scroll="); ok {
+			rows, err := strconv.ParseFloat(value, 32)
+			if space != SpaceWatch || err != nil || !(rows >= -1000 && rows <= 1000) {
+				return fail("expected watch:scroll=N, between -1000 and 1000 rows")
+			}
+			scrollRows, action = float32(rows), "scroll"
 		}
 		showIndex := -1
 		if base, option, hasOption := strings.Cut(action, ":"); hasOption {
@@ -72,7 +84,10 @@ func (ui *UI) advanceDebugSequence(now time.Time) string {
 			}
 			action, showIndex = base, n-1
 		}
-		if action != "play" && action != "show" {
+		if action == "play" && (space == SpaceWatch || space == SpaceShorts) {
+			return fail("use show for Watch and Shorts")
+		}
+		if action != "play" && action != "show" && action != "scroll" {
 			return fail("unknown action")
 		}
 		if !seq.entered {
@@ -81,6 +96,9 @@ func (ui *UI) advanceDebugSequence(now time.Time) string {
 				ui.switchSpace(space)
 			}
 			seq.entered = true
+		}
+		if action == "scroll" {
+			ui.spaces.State(space).ScrollList.ScrollBy(scrollRows)
 		}
 		if action == "play" {
 			state := ui.spaces.State(space)

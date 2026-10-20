@@ -14,7 +14,6 @@ import (
 	"gioui.org/op/paint"
 	"gioui.org/unit"
 	"gioui.org/widget"
-	"gioui.org/widget/material"
 )
 
 // layoutRail renders the left navigation rail:
@@ -71,7 +70,7 @@ func (ui *UI) layoutRail(gtx layout.Context) layout.Dimensions {
 					}),
 					layout.Rigid(layout.Spacer{Width: unit.Dp(10)}.Layout),
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						lbl := material.Label(ui.th, unit.Sp(20), "lightTube")
+						lbl := ui.label(unit.Sp(20), "lightTube")
 						lbl.Color = ui.colors.Text
 						lbl.Font.Weight = font.Bold
 						return lbl.Layout(gtx)
@@ -83,14 +82,14 @@ func (ui *UI) layoutRail(gtx layout.Context) layout.Dimensions {
 		if !collapsed {
 			children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				return layout.Inset{Top: unit.Dp(6), Bottom: unit.Dp(16), Left: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-					lbl := material.Label(ui.th, unit.Sp(10), "Independent client")
+					lbl := ui.label(unit.Sp(10), "Independent client")
 					lbl.Color = ui.colors.Text2
 					return lbl.Layout(gtx)
 				})
 			}))
 			children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				return layout.Inset{Left: unit.Dp(12), Bottom: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-					lbl := material.Label(ui.th, unit.Sp(11), "Your spaces")
+					lbl := ui.label(unit.Sp(11), "Your spaces")
 					lbl.Color = ui.colors.Text2
 					lbl.Font.Weight = font.Medium
 					return lbl.Layout(gtx)
@@ -166,7 +165,7 @@ func (ui *UI) layoutRail(gtx layout.Context) layout.Dimensions {
 		if !collapsed {
 			children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				return layout.Inset{Top: unit.Dp(12), Left: unit.Dp(8), Right: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-					lbl := material.Label(ui.th, unit.Sp(10), "Independent client\nNot affiliated with YouTube.")
+					lbl := ui.label(unit.Sp(10), "Independent client\nNot affiliated with YouTube.")
 					lbl.Color = ui.colors.Text2
 					return lbl.Layout(gtx)
 				})
@@ -190,7 +189,7 @@ func (ui *UI) drawBrandMark(gtx layout.Context) layout.Dimensions {
 	r := clip.UniformRRect(image.Rect(0, 0, sz, sz), gtx.Dp(9))
 	paint.FillShape(gtx.Ops, ui.colors.Accent, r.Op(gtx.Ops))
 	layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		lbl := material.Label(ui.th, unit.Sp(13), "LT")
+		lbl := ui.label(unit.Sp(13), "LT")
 		lbl.Color = color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff}
 		lbl.Font.Weight = font.Bold
 		return lbl.Layout(gtx)
@@ -237,7 +236,7 @@ func (ui *UI) layoutRailRow(gtx layout.Context, click *widget.Clickable, label s
 				}),
 				layout.Rigid(layout.Spacer{Width: unit.Dp(16)}.Layout),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					lbl := material.Label(ui.th, unit.Sp(14), label)
+					lbl := ui.label(unit.Sp(14), label)
 					lbl.Color = ui.colors.Text
 					if isActive {
 						lbl.Font.Weight = font.Medium
@@ -500,14 +499,14 @@ func (ui *UI) layoutPerSpaceHeading(gtx layout.Context) layout.Dimensions {
 					if isNarrow {
 						titleSp = unit.Sp(22)
 					}
-					lbl := material.Label(ui.th, titleSp, cfg.Title)
+					lbl := ui.label(titleSp, cfg.Title)
 					lbl.Color = ui.colors.Text
 					lbl.Font.Weight = font.Bold
 					return lbl.Layout(gtx)
 				}),
 				layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					lbl := material.Label(ui.th, unit.Sp(12), cfg.Subtitle)
+					lbl := ui.label(unit.Sp(12), cfg.Subtitle)
 					lbl.Color = ui.colors.Text2
 					return lbl.Layout(gtx)
 				}),
@@ -580,7 +579,7 @@ func (ui *UI) layoutPillBadge(gtx layout.Context, text string, isButton bool) la
 				Left:   unit.Dp(12),
 				Right:  unit.Dp(12),
 			}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				lbl := material.Label(ui.th, unit.Sp(11), text)
+				lbl := ui.label(unit.Sp(11), text)
 				if isButton {
 					lbl.Color = ui.colors.Text
 				} else {
@@ -652,7 +651,7 @@ func (ui *UI) layoutChips(gtx layout.Context) layout.Dimensions {
 								Left:   unit.Dp(14),
 								Right:  unit.Dp(14),
 							}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-								lbl := material.Label(ui.th, unit.Sp(12), chipName)
+								lbl := ui.label(unit.Sp(12), chipName)
 								if isSelected {
 									lbl.Color = ui.colors.Bg // Active: bg text (#0f0f0f)
 									lbl.Font.Weight = font.Bold
@@ -742,7 +741,7 @@ func (ui *UI) layoutBottomBar(gtx layout.Context) layout.Dimensions {
 						}),
 						layout.Rigid(layout.Spacer{Height: unit.Dp(2)}.Layout),
 						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-							lbl := material.Label(ui.th, unit.Sp(10), spaceItem.label)
+							lbl := ui.label(unit.Sp(10), spaceItem.label)
 							lbl.Color = textCol
 							if isActive {
 								lbl.Font.Weight = font.Bold
@@ -783,14 +782,14 @@ func (ui *UI) layoutPlaceholderScreen(gtx layout.Context, spaceName string) layo
 				}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 					return layout.Flex{Axis: layout.Vertical, Alignment: layout.Middle}.Layout(gtx,
 						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-							lbl := material.Label(ui.th, unit.Sp(22), fmt.Sprintf("%s arrives in the next step.", spaceName))
+							lbl := ui.label(unit.Sp(22), fmt.Sprintf("%s arrives in the next step.", spaceName))
 							lbl.Color = ui.colors.Text
 							lbl.Font.Weight = font.Bold
 							return lbl.Layout(gtx)
 						}),
 						layout.Rigid(layout.Spacer{Height: unit.Dp(10)}.Layout),
 						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-							lbl := material.Label(ui.th, unit.Sp(13), "This space will feature native content and its own ordered queue without fake data.")
+							lbl := ui.label(unit.Sp(13), "This space will feature native content and its own ordered queue without fake data.")
 							lbl.Color = ui.colors.Text2
 							return lbl.Layout(gtx)
 						}),

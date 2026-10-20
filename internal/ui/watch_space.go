@@ -15,7 +15,6 @@ import (
 	"gioui.org/op/paint"
 	"gioui.org/unit"
 	"gioui.org/widget"
-	"gioui.org/widget/material"
 
 	"lighttube/internal/store"
 	"lighttube/internal/yt"
@@ -68,68 +67,72 @@ func (ui *UI) layoutWatchSpace(gtx layout.Context) layout.Dimensions {
 		padX = unit.Dp(12)
 	}
 
-	return ui.spaces.Active().ScrollList.Layout(gtx, 1, func(gtx layout.Context, _ int) layout.Dimensions {
-		var children []layout.FlexChild
-
-		// 1. Hero section on For you tab
-		if showHero && hasHero {
-			children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				return layout.Inset{Left: padX, Right: padX, Top: unit.Dp(12)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-					return ui.layoutWatchHero(gtx, hero, heroPos)
-				})
-			}))
-			children = append(children, layout.Rigid(layout.Spacer{Height: unit.Dp(28)}.Layout))
-		}
-
-		// 2. Section heading & count
-		children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			return layout.Inset{Left: padX, Right: padX, Bottom: unit.Dp(16)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						lbl := material.Label(ui.th, unit.Sp(18), sectionHeading)
-						lbl.Color = ui.colors.Text
-						lbl.Font.Weight = font.Bold
-						return lbl.Layout(gtx)
-					}),
-					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-						return layout.Dimensions{Size: gtx.Constraints.Min}
-					}),
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						lbl := material.Label(ui.th, unit.Sp(12), countStr)
-						lbl.Color = ui.colors.Text2
-						return lbl.Layout(gtx)
-					}),
-				)
+	// Each row is a list item so offscreen titles never build glyph paths.
+	var items []layout.Widget
+	if showHero && hasHero {
+		items = append(items, func(gtx layout.Context) layout.Dimensions {
+			return layout.Inset{Left: padX, Right: padX, Top: unit.Dp(12), Bottom: unit.Dp(28)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				return ui.layoutWatchHero(gtx, hero, heroPos)
 			})
-		}))
-
-		// 3. Responsive video grid
-		if len(gridVideos) == 0 {
-			children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				return layout.Inset{Left: padX, Right: padX, Top: unit.Dp(24), Bottom: unit.Dp(24)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-					msg := "No videos match this filter."
-					if activeChip == 2 {
-						msg = "No unfinished videos to continue watching."
-					} else if activeChip == 3 {
-						msg = "No saved videos yet."
-					}
-					lbl := material.Label(ui.th, unit.Sp(13), msg)
+		})
+	}
+	items = append(items, func(gtx layout.Context) layout.Dimensions {
+		return layout.Inset{Left: padX, Right: padX, Bottom: unit.Dp(16)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					lbl := ui.label(unit.Sp(18), sectionHeading)
+					lbl.Color = ui.colors.Text
+					lbl.Font.Weight = font.Bold
+					return lbl.Layout(gtx)
+				}),
+				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+					return layout.Dimensions{Size: gtx.Constraints.Min}
+				}),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					lbl := ui.label(unit.Sp(12), countStr)
 					lbl.Color = ui.colors.Text2
 					return lbl.Layout(gtx)
-				})
-			}))
-		} else {
-			children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				return layout.Inset{Left: padX, Right: padX}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-					return ui.layoutResponsiveGrid(gtx, gridVideos)
-				})
-			}))
+				}),
+			)
+		})
+	})
+	if len(gridVideos) == 0 {
+		items = append(items, func(gtx layout.Context) layout.Dimensions {
+			return layout.Inset{Left: padX, Right: padX, Top: unit.Dp(24), Bottom: unit.Dp(24)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				msg := "No videos match this filter."
+				if activeChip == 2 {
+					msg = "No unfinished videos to continue watching."
+				} else if activeChip == 3 {
+					msg = "No saved videos yet."
+				}
+				lbl := ui.label(unit.Sp(13), msg)
+				lbl.Color = ui.colors.Text2
+				return lbl.Layout(gtx)
+			})
+		})
+	} else {
+		width := gtx.Constraints.Max.X - 2*gtx.Dp(padX)
+		cols := watchGridColumns(gtx, width)
+		rows := (len(gridVideos) + cols - 1) / cols
+		for len(ui.cardClicks) < len(gridVideos) {
+			ui.cardClicks = append(ui.cardClicks, widget.Clickable{})
+			ui.cardClockClicks = append(ui.cardClockClicks, widget.Clickable{})
 		}
-
-		// 4. Bottom spacing inside scroll view
-		children = append(children, layout.Rigid(layout.Spacer{Height: unit.Dp(32)}.Layout))
-
-		return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
+		for row := 0; row < rows; row++ {
+			items = append(items, func(gtx layout.Context) layout.Dimensions {
+				bottom := unit.Dp(0)
+				if row < rows-1 {
+					bottom = 24
+				}
+				return layout.Inset{Left: padX, Right: padX, Bottom: bottom}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+					return ui.layoutResponsiveGridRow(gtx, gridVideos, row, cols)
+				})
+			})
+		}
+	}
+	items = append(items, layout.Spacer{Height: unit.Dp(32)}.Layout)
+	return ui.spaces.Active().ScrollList.Layout(gtx, len(items), func(gtx layout.Context, index int) layout.Dimensions {
+		return items[index](gtx)
 	})
 }
 
@@ -294,7 +297,7 @@ func (ui *UI) layoutHeroPlayerPreview(gtx layout.Context, hero yt.Video, pos sto
 							}),
 							layout.Rigid(layout.Spacer{Width: unit.Dp(10)}.Layout),
 							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								lbl := material.Label(ui.th, unit.Sp(11), timeStr)
+								lbl := ui.label(unit.Sp(11), timeStr)
 								lbl.Color = color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff}
 								return lbl.Layout(gtx)
 							}),
@@ -337,7 +340,7 @@ func (ui *UI) layoutHeroCopy(gtx layout.Context, hero yt.Video, pos store.Positi
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		// Eyebrow
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			lbl := material.Label(ui.th, unit.Sp(11), eyebrow)
+			lbl := ui.label(unit.Sp(11), eyebrow)
 			lbl.Color = ui.colors.Text2
 			lbl.Font.Weight = font.Bold
 			return lbl.Layout(gtx)
@@ -346,7 +349,7 @@ func (ui *UI) layoutHeroCopy(gtx layout.Context, hero yt.Video, pos store.Positi
 
 		// Title
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			lbl := material.Label(ui.th, unit.Sp(22), hero.Title)
+			lbl := ui.label(unit.Sp(22), hero.Title)
 			lbl.Color = ui.colors.Text
 			lbl.Font.Weight = font.Bold
 			return lbl.Layout(gtx)
@@ -357,13 +360,13 @@ func (ui *UI) layoutHeroCopy(gtx layout.Context, hero yt.Video, pos store.Positi
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					return layoutAvatar(gtx, ui.th, hero.ChannelID, hero.Channel, 34)
+					return ui.layoutAvatar(gtx, hero.ChannelID, hero.Channel, 34)
 				}),
 				layout.Rigid(layout.Spacer{Width: unit.Dp(10)}.Layout),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-							lbl := material.Label(ui.th, unit.Sp(13), hero.Channel)
+							lbl := ui.label(unit.Sp(13), hero.Channel)
 							lbl.Color = ui.colors.Text
 							lbl.Font.Weight = font.Medium
 							return lbl.Layout(gtx)
@@ -373,7 +376,7 @@ func (ui *UI) layoutHeroCopy(gtx layout.Context, hero yt.Video, pos store.Positi
 							if !ui.demo && hero.ViewCount > 0 {
 								subText = fmt.Sprintf("%d views", hero.ViewCount)
 							}
-							lbl := material.Label(ui.th, unit.Sp(11), subText)
+							lbl := ui.label(unit.Sp(11), subText)
 							lbl.Color = ui.colors.Text2
 							return lbl.Layout(gtx)
 						}),
@@ -389,7 +392,7 @@ func (ui *UI) layoutHeroCopy(gtx layout.Context, hero yt.Video, pos store.Positi
 			if desc == "" {
 				return layout.Dimensions{}
 			}
-			lbl := material.Label(ui.th, unit.Sp(12), desc)
+			lbl := ui.label(unit.Sp(12), desc)
 			lbl.Color = ui.colors.Text2
 			return lbl.Layout(gtx)
 		}),
@@ -416,7 +419,7 @@ func (ui *UI) layoutHeroCopy(gtx layout.Context, hero yt.Video, pos store.Positi
 							},
 							func(gtx layout.Context) layout.Dimensions {
 								return layout.Inset{Top: unit.Dp(10), Bottom: unit.Dp(10), Left: unit.Dp(20), Right: unit.Dp(20)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-									lbl := material.Label(ui.th, unit.Sp(13), btnText)
+									lbl := ui.label(unit.Sp(13), btnText)
 									lbl.Color = color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff}
 									lbl.Font.Weight = font.Bold
 									return lbl.Layout(gtx)
@@ -440,7 +443,7 @@ func (ui *UI) layoutHeroCopy(gtx layout.Context, hero yt.Video, pos store.Positi
 							},
 							func(gtx layout.Context) layout.Dimensions {
 								return layout.Inset{Top: unit.Dp(10), Bottom: unit.Dp(10), Left: unit.Dp(16), Right: unit.Dp(16)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-									lbl := material.Label(ui.th, unit.Sp(12), "Save for later")
+									lbl := ui.label(unit.Sp(12), "Save for later")
 									lbl.Color = ui.colors.Text
 									return lbl.Layout(gtx)
 								})
@@ -453,70 +456,37 @@ func (ui *UI) layoutHeroCopy(gtx layout.Context, hero yt.Video, pos store.Positi
 	)
 }
 
-// layoutResponsiveGrid renders video cards in a 3-column landscape grid
-// (collapses to 2 at medium width < 1050 dp, 1 at narrow width < 650 dp).
-func (ui *UI) layoutResponsiveGrid(gtx layout.Context, videos []yt.Video) layout.Dimensions {
-	w := gtx.Constraints.Max.X
-	cols := 3
-	if w < gtx.Dp(1050) {
-		cols = 2
+func watchGridColumns(gtx layout.Context, width int) int {
+	if width < gtx.Dp(650) {
+		return 1
 	}
-	if w < gtx.Dp(650) {
-		cols = 1
+	if width < gtx.Dp(1050) {
+		return 2
 	}
+	return 3
+}
 
-	gap := gtx.Dp(18)
-	cardW := (w - gap*(cols-1)) / cols
+func (ui *UI) layoutResponsiveGridRow(gtx layout.Context, videos []yt.Video, row, cols int) layout.Dimensions {
+	w := gtx.Constraints.Max.X
+	cardW := (w - gtx.Dp(18)*(cols-1)) / cols
 	if cardW < gtx.Dp(180) {
 		cardW = gtx.Dp(180)
 	}
 	if cardW > w {
 		cardW = w
 	}
-
-	// Group into rows
-	var rows [][]yt.Video
-	for i := 0; i < len(videos); i += cols {
-		end := i + cols
-		if end > len(videos) {
-			end = len(videos)
-		}
-		rows = append(rows, videos[i:end])
-	}
-
-	for len(ui.cardClicks) < len(videos) {
-		ui.cardClicks = append(ui.cardClicks, widget.Clickable{})
-		ui.cardClockClicks = append(ui.cardClockClicks, widget.Clickable{})
-	}
-
-	var rowChildren []layout.FlexChild
-	for rowIdx, row := range rows {
-		rIdx := rowIdx
-		rowVideos := row
-		rowChildren = append(rowChildren, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			var colChildren []layout.FlexChild
-			for colIdx, v := range rowVideos {
-				cIdx := colIdx
-				video := v
-				globalIdx := rIdx*cols + cIdx
-
-				colChildren = append(colChildren, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					cgtx := gtx
-					cgtx.Constraints = layout.Exact(image.Pt(cardW, cardW*9/16+gtx.Dp(90)))
-					return ui.layoutVideoCard(cgtx, video, globalIdx, cardW)
-				}))
-				if cIdx < len(rowVideos)-1 {
-					colChildren = append(colChildren, layout.Rigid(layout.Spacer{Width: unit.Dp(18)}.Layout))
-				}
-			}
-			return layout.Flex{Axis: layout.Horizontal}.Layout(gtx, colChildren...)
+	end := min((row+1)*cols, len(videos))
+	var children []layout.FlexChild
+	for index := row * cols; index < end; index++ {
+		children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			gtx.Constraints = layout.Exact(image.Pt(cardW, cardW*9/16+gtx.Dp(90)))
+			return ui.layoutVideoCard(gtx, videos[index], index, cardW)
 		}))
-		if rIdx < len(rows)-1 {
-			rowChildren = append(rowChildren, layout.Rigid(layout.Spacer{Height: unit.Dp(24)}.Layout))
+		if index < end-1 {
+			children = append(children, layout.Rigid(layout.Spacer{Width: unit.Dp(18)}.Layout))
 		}
 	}
-
-	return layout.Flex{Axis: layout.Vertical}.Layout(gtx, rowChildren...)
+	return layout.Flex{Axis: layout.Horizontal}.Layout(gtx, children...)
 }
 
 // layoutVideoCard renders an individual card with 11 dp radius thumbnail, duration badge,
@@ -610,7 +580,7 @@ func (ui *UI) layoutVideoCard(gtx layout.Context, v yt.Video, idx int, width int
 								},
 								func(gtx layout.Context) layout.Dimensions {
 									return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-										lbl := material.Label(ui.th, unit.Sp(10), durText)
+										lbl := ui.label(unit.Sp(10), durText)
 										lbl.Color = color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff}
 										lbl.Font.Weight = font.Medium
 										return lbl.Layout(gtx)
@@ -637,13 +607,13 @@ func (ui *UI) layoutVideoCard(gtx layout.Context, v yt.Video, idx int, width int
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Start}.Layout(gtx,
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return layoutAvatar(gtx, ui.th, v.ChannelID, v.Channel, 32)
+						return ui.layoutAvatar(gtx, v.ChannelID, v.Channel, 32)
 					}),
 					layout.Rigid(layout.Spacer{Width: unit.Dp(10)}.Layout),
 					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 						return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								lbl := material.Label(ui.th, unit.Sp(13), v.Title)
+								lbl := ui.label(unit.Sp(13), v.Title)
 								lbl.Color = ui.colors.Text
 								lbl.Font.Weight = font.Medium
 								lbl.MaxLines = 2
@@ -657,7 +627,7 @@ func (ui *UI) layoutVideoCard(gtx layout.Context, v yt.Video, idx int, width int
 								} else if hasPos && pos.IsUnfinished() {
 									meta += fmt.Sprintf(" • Resumes at %s", formatSeconds(int(pos.Seconds)))
 								}
-								lbl := material.Label(ui.th, unit.Sp(11), meta)
+								lbl := ui.label(unit.Sp(11), meta)
 								lbl.Color = ui.colors.Text2
 								return lbl.Layout(gtx)
 							}),

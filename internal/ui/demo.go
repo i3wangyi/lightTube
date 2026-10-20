@@ -97,14 +97,6 @@ type DemoData struct {
 	DockTrack    DemoTrack
 }
 
-// PrefetchDemoImages triggers background decoding of all embedded demo images
-// so they do not block the UI thread on the first frame.
-func PrefetchDemoImages() {
-	for _, f := range DemoFiles {
-		_, _ = demo.GetImage(f)
-	}
-}
-
 // LoadDemoData returns the fictional demo records and metadata without blocking for image decoding.
 func LoadDemoData() *DemoData {
 	hero := yt.Video{
@@ -402,10 +394,10 @@ func (ui *UI) getDemoImage(filename string) (image.Image, bool) {
 			img, err := demo.GetImage(filename)
 			ui.sendAction(func() {
 				delete(ui.demoLoading, filename)
-				if err == nil && img != nil {
-					ui.invalidate()
-				}
 			})
+			if err == nil && img != nil {
+				ui.invalidate()
+			}
 		}()
 	}
 	return nil, false

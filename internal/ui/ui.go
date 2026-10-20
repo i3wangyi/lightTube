@@ -14,7 +14,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
-	"runtime/debug"
 	"runtime/pprof"
 	"strconv"
 	"strings"
@@ -88,12 +87,16 @@ type Options struct {
 
 // UI manages the Gio window, layout, and event interactions.
 type UI struct {
-	ytClient *yt.Client
-	store    *store.Store
-	player   *player.Player
-	account  *yt.Account
-	thumbs   *thumbs.Manager
-	window   *app.Window
+	startupMemory      startupMemory
+	startupStoreLoaded bool
+	startupFeedPending bool
+	fonts              *themeFonts
+	ytClient           *yt.Client
+	store              *store.Store
+	player             *player.Player
+	account            *yt.Account
+	thumbs             *thumbs.Manager
+	window             *app.Window
 
 	th     *material.Theme
 	colors ThemeColors
@@ -344,7 +347,7 @@ func New(opts Options) *UI {
 		thMgr = thumbs.New()
 	}
 
-	th, colors := NewDarkTheme()
+	th, colors, fonts := newLazyDarkTheme()
 
 	acc := opts.Account
 	if !opts.Demo && acc == nil {
@@ -387,6 +390,7 @@ func New(opts Options) *UI {
 	}
 
 	ui := &UI{
+		fonts:                fonts,
 		ytClient:             ytClient,
 		store:                st,
 		player:               p,
@@ -439,7 +443,6 @@ func New(opts Options) *UI {
 		if ui.demoData != nil {
 			ui.state.Videos = ui.demoData.Videos
 		}
-		go PrefetchDemoImages()
 	} else {
 		suggestClient := opts.SuggestClient
 		if suggestClient == nil {
@@ -558,6 +561,9 @@ func (ui *UI) writeHeapProfile() {
 	}
 	ui.heapWritten = true
 	if ui.debug {
+		var stats runtime.MemStats
+		runtime.ReadMemStats(&stats)
+		fmt.Fprintf(os.Stderr, "memory: heap_live=%d heap_sys=%d heap_released=%d heap_goal=%d thumbnails=%d thumbnail_bytes=%d\n", stats.HeapAlloc, stats.HeapSys, stats.HeapReleased, stats.NextGC, ui.thumbs.Len(), ui.thumbs.UsedBytes())
 		fmt.Fprintf(os.Stderr, "heap profile written to %s\n", ui.debugHeap)
 	}
 }
@@ -814,12 +820,14 @@ func (ui *UI) eventLoop() error {
 			}
 
 			e.Frame(gtx.Ops)
+			ui.startupMemory.frame(ui.startupMemoryReady())
 			ui.firstFramePresented = true
 		}
 	}
 }
 
 func (ui *UI) onStoreLoaded() {
+	ui.startupStoreLoaded = true
 	if ui.debugSequence != nil {
 		ui.debugSequence.ready = true
 	}
@@ -863,8 +871,6 @@ func (ui *UI) onStoreLoaded() {
 	} else if ui.state.CurrentTab == TabPlaylist || ui.debugPlaylist {
 		ui.loadSavedPlaylists()
 	}
-	runtime.GC()
-	debug.FreeOSMemory()
 }
 
 func (ui *UI) updatePower() {
@@ -1935,6 +1941,7 @@ func (ui *UI) loadMergedFeed() {
 	}
 
 	ui.state.Status = "Loading subscription feed…"
+	ui.startupFeedPending = true
 	channelIDs := make([]string, 0, len(subs))
 	for _, s := range subs {
 		if s.ChannelID != "" {
@@ -1948,6 +1955,7 @@ func (ui *UI) loadMergedFeed() {
 
 		videos, err := ui.ytClient.MergedFeed(ctx, channelIDs)
 		ui.sendAction(func() {
+			ui.startupFeedPending = false
 			if !ui.requestCurrent(request) {
 				return
 			}
@@ -2250,7 +2258,19 @@ func (ui *UI) label(size unit.Sp, txt string) material.LabelStyle {
 	if ui.labelHook != nil {
 		ui.labelHook(txt)
 	}
+	ui.fonts.ensure(ui.th, txt)
 	return material.Label(ui.th, size, txt)
+}
+
+func (ui *UI) editor(editor *widget.Editor, hint string) material.EditorStyle {
+	ui.fonts.ensure(ui.th, hint)
+	ui.fonts.ensure(ui.th, editor.Text())
+	return material.Editor(ui.th, editor, hint)
+}
+
+func (ui *UI) button(button *widget.Clickable, label string) material.ButtonStyle {
+	ui.fonts.ensure(ui.th, label)
+	return material.Button(ui.th, button, label)
 }
 
 func (ui *UI) oneLineLabel(size unit.Sp, txt string) material.LabelStyle {
@@ -2331,7 +2351,7 @@ func (ui *UI) layoutPillButton(gtx layout.Context, click *widget.Clickable, text
 			Left:   unit.Dp(20),
 			Right:  unit.Dp(20),
 		}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-			lbl := material.Label(ui.th, unit.Sp(13), text)
+			lbl := ui.label(unit.Sp(13), text)
 			if primary {
 				lbl.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
 			} else {
@@ -2902,7 +2922,7 @@ func (ui *UI) layoutTopBar(gtx layout.Context) layout.Dimensions {
 						if ui.watchBackBtn.Hovered() {
 							pointer.CursorPointer.Add(gtx.Ops)
 						}
-						btn := material.Button(ui.th, &ui.watchBackBtn, "← Back")
+						btn := ui.button(&ui.watchBackBtn, "← Back")
 						btn.Background = ui.colors.Surface
 						btn.Color = ui.colors.Text
 						btn.CornerRadius = unit.Dp(16)
@@ -2923,7 +2943,7 @@ func (ui *UI) layoutTopBar(gtx layout.Context) layout.Dimensions {
 				if !showChip {
 					return layout.Dimensions{}
 				}
-				lbl := material.Label(ui.th, unit.Sp(14), scopeLabel)
+				lbl := ui.label(unit.Sp(14), scopeLabel)
 				lbl.Color = ui.colors.Text2
 				lbl.Font.Weight = font.Medium
 				return layout.Inset{Left: unit.Dp(8), Right: unit.Dp(16)}.Layout(gtx, lbl.Layout)
@@ -2984,7 +3004,7 @@ func (ui *UI) layoutTopBar(gtx layout.Context) layout.Dimensions {
 									if ui.topBarProfileClick.Clicked(gtx) {
 										ui.openUtility(TabAccount)
 									}
-									return layoutAvatar(gtx, ui.th, "", "You", 32)
+									return ui.layoutAvatar(gtx, "", "You", 32)
 								})
 							}),
 						)
@@ -3001,7 +3021,7 @@ func (ui *UI) layoutTopBar(gtx layout.Context) layout.Dimensions {
 						if ui.topBarProfileClick.Clicked(gtx) {
 							ui.openUtility(TabAccount)
 						}
-						return layoutAvatar(gtx, ui.th, "", "You", 32)
+						return ui.layoutAvatar(gtx, "", "You", 32)
 					})
 				})
 			}),
@@ -3089,7 +3109,7 @@ func (ui *UI) layoutSearchBox(gtx layout.Context, pillW, h int) layout.Dimension
 					if ui.showingUtility {
 						placeholder = "Search YouTube"
 					}
-					ed := material.Editor(ui.th, &ui.searchEditor, placeholder)
+					ed := ui.editor(&ui.searchEditor, placeholder)
 					ed.Color = ui.colors.Text
 					ed.HintColor = ui.colors.Text2
 					ed.TextSize = unit.Sp(16)
@@ -3131,7 +3151,7 @@ func (ui *UI) layoutPolicyLabel(gtx layout.Context) layout.Dimensions {
 				Left:   unit.Dp(12),
 				Right:  unit.Dp(12),
 			}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				lbl := material.Label(ui.th, unit.Sp(12), policyText)
+				lbl := ui.label(unit.Sp(12), policyText)
 				lbl.Color = ui.colors.Text2
 				return lbl.Layout(gtx)
 			})
@@ -3215,7 +3235,7 @@ func (ui *UI) layoutMiniGuide(gtx layout.Context) layout.Dimensions {
 									}),
 									layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
 									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-										lbl := material.Label(ui.th, unit.Sp(10), item.label)
+										lbl := ui.label(unit.Sp(10), item.label)
 										lbl.Color = labelColor
 										if isSelected {
 											lbl.Font.Weight = font.Medium
@@ -3357,7 +3377,7 @@ func (ui *UI) layoutChipsRow(gtx layout.Context) layout.Dimensions {
 								Left:   unit.Dp(12),
 								Right:  unit.Dp(12),
 							}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-								lbl := material.Label(ui.th, unit.Sp(13), title)
+								lbl := ui.label(unit.Sp(13), title)
 								lbl.Color = chipFg
 								if isSelected {
 									lbl.Font.Weight = font.Medium
@@ -3442,7 +3462,7 @@ func (ui *UI) layoutCardGrid(gtx layout.Context) layout.Dimensions {
 		if ui.state.ActiveChannelTitle != "" {
 			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					lbl := material.Label(ui.th, unit.Sp(20), ui.state.ActiveChannelTitle)
+					lbl := ui.label(unit.Sp(20), ui.state.ActiveChannelTitle)
 					lbl.Font.Weight = font.Bold
 					lbl.Color = ui.colors.Text
 					return layout.Inset{Bottom: unit.Dp(16)}.Layout(gtx, lbl.Layout)
@@ -3553,14 +3573,14 @@ func (ui *UI) layoutCard(gtx layout.Context, index, cardWidthPx, thumbHeightPx i
 							return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Start}.Layout(gtx,
 								// 36dp circle avatar
 								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-									return layoutAvatar(gtx, ui.th, v.ChannelID, v.Channel, 36)
+									return ui.layoutAvatar(gtx, v.ChannelID, v.Channel, 36)
 								}),
 								layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
 								// Text metadata
 								layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 									return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 										layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-											title := material.Label(ui.th, unit.Sp(16), v.Title)
+											title := ui.label(unit.Sp(16), v.Title)
 											title.Font.Weight = font.Medium
 											title.Color = ui.colors.Text
 											title.MaxLines = 2
@@ -3569,7 +3589,7 @@ func (ui *UI) layoutCard(gtx layout.Context, index, cardWidthPx, thumbHeightPx i
 										}),
 										layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
 										layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-											ch := material.Label(ui.th, unit.Sp(14), v.Channel)
+											ch := ui.label(unit.Sp(14), v.Channel)
 											ch.Color = ui.colors.Text2
 											ch.MaxLines = 1
 											ch.Truncator = "…"
@@ -3578,7 +3598,7 @@ func (ui *UI) layoutCard(gtx layout.Context, index, cardWidthPx, thumbHeightPx i
 										layout.Rigid(layout.Spacer{Height: unit.Dp(2)}.Layout),
 										layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 											metaText := FormatMetaLine(v.ViewCount, v.UploadDate, v.PublishedAt, time.Now())
-											meta := material.Label(ui.th, unit.Sp(14), metaText)
+											meta := ui.label(unit.Sp(14), metaText)
 											meta.Color = ui.colors.Text2
 											meta.MaxLines = 1
 											meta.Truncator = "…"
@@ -3748,7 +3768,7 @@ func (ui *UI) layoutCardThumbnail(gtx layout.Context, v yt.Video, w, h int, isSe
 									Left:   unit.Dp(5),
 									Right:  unit.Dp(5),
 								}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-									lbl := material.Label(ui.th, unit.Sp(12), durStr)
+									lbl := ui.label(unit.Sp(12), durStr)
 									lbl.Color = ui.colors.BadgeFg
 									lbl.Font.Weight = font.Medium
 									return lbl.Layout(gtx)
@@ -3871,7 +3891,7 @@ func (ui *UI) layoutSearchRow(gtx layout.Context, index int, v yt.Video) layout.
 							return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 								// Title: 18 sp medium max 2 lines
 								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-									title := material.Label(ui.th, unit.Sp(18), v.Title)
+									title := ui.label(unit.Sp(18), v.Title)
 									title.Color = ui.colors.Text
 									title.Font.Weight = font.Medium
 									title.MaxLines = 2
@@ -3882,7 +3902,7 @@ func (ui *UI) layoutSearchRow(gtx layout.Context, index int, v yt.Video) layout.
 								// Meta line: "1.2M views · 3 days ago", 12 sp text2
 								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 									metaText := FormatMetaLine(v.ViewCount, v.UploadDate, v.PublishedAt, time.Now())
-									meta := material.Label(ui.th, unit.Sp(12), metaText)
+									meta := ui.label(unit.Sp(12), metaText)
 									meta.Color = ui.colors.Text2
 									return meta.Layout(gtx)
 								}),
@@ -3891,11 +3911,11 @@ func (ui *UI) layoutSearchRow(gtx layout.Context, index int, v yt.Video) layout.
 								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 									return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
 										layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-											return layoutAvatar(gtx, ui.th, v.ChannelID, v.Channel, 24)
+											return ui.layoutAvatar(gtx, v.ChannelID, v.Channel, 24)
 										}),
 										layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
 										layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-											lbl := material.Label(ui.th, unit.Sp(12), v.Channel)
+											lbl := ui.label(unit.Sp(12), v.Channel)
 											lbl.Color = ui.colors.Text2
 											return lbl.Layout(gtx)
 										}),
@@ -4036,7 +4056,7 @@ func (ui *UI) layoutSubscriptionsView(gtx layout.Context) layout.Dimensions {
 						Top:    unit.Dp(24),
 						Bottom: unit.Dp(16),
 					}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-						lbl := material.Label(ui.th, unit.Sp(18), "Manage subscriptions")
+						lbl := ui.label(unit.Sp(18), "Manage subscriptions")
 						lbl.Font.Weight = font.Bold
 						lbl.Color = ui.colors.Text
 						return lbl.Layout(gtx)
@@ -4065,7 +4085,7 @@ func (ui *UI) layoutSubscriptionsView(gtx layout.Context) layout.Dimensions {
 											Left:   unit.Dp(14),
 											Right:  unit.Dp(14),
 										}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-											ed := material.Editor(ui.th, &ui.addChannelEditor, "Add channel: URL, @handle or UC id")
+											ed := ui.editor(&ui.addChannelEditor, "Add channel: URL, @handle or UC id")
 											ed.Color = ui.colors.Text
 											ed.HintColor = ui.colors.Text2
 											ed.TextSize = unit.Sp(13)
@@ -4076,7 +4096,7 @@ func (ui *UI) layoutSubscriptionsView(gtx layout.Context) layout.Dimensions {
 							}),
 							layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
 							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								btn := material.Button(ui.th, &ui.addChannelBtn, "Subscribe")
+								btn := ui.button(&ui.addChannelBtn, "Subscribe")
 								btn.Background = ui.colors.Action
 								btn.Color = color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff}
 								btn.CornerRadius = unit.Dp(18)
@@ -4109,7 +4129,7 @@ func (ui *UI) layoutSubscriptionsView(gtx layout.Context) layout.Dimensions {
 											Left:   unit.Dp(14),
 											Right:  unit.Dp(14),
 										}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-											ed := material.Editor(ui.th, &ui.csvPathEditor, "Path to subscriptions.csv…")
+											ed := ui.editor(&ui.csvPathEditor, "Path to subscriptions.csv…")
 											ed.Color = ui.colors.Text
 											ed.HintColor = ui.colors.Text2
 											ed.TextSize = unit.Sp(13)
@@ -4120,7 +4140,7 @@ func (ui *UI) layoutSubscriptionsView(gtx layout.Context) layout.Dimensions {
 							}),
 							layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
 							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								btn := material.Button(ui.th, &ui.importCSVBtn, "Import")
+								btn := ui.button(&ui.importCSVBtn, "Import")
 								btn.Background = ui.colors.Surface
 								btn.Color = ui.colors.Text
 								btn.CornerRadius = unit.Dp(8)
@@ -4135,7 +4155,7 @@ func (ui *UI) layoutSubscriptionsView(gtx layout.Context) layout.Dimensions {
 						Right:  unit.Dp(24),
 						Bottom: unit.Dp(12),
 					}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-						lbl := material.Label(ui.th, unit.Sp(16), fmt.Sprintf("Subscribed channels (%d)", len(subs)))
+						lbl := ui.label(unit.Sp(16), fmt.Sprintf("Subscribed channels (%d)", len(subs)))
 						lbl.Font.Weight = font.Bold
 						lbl.Color = ui.colors.Text
 						return lbl.Layout(gtx)
@@ -4147,7 +4167,7 @@ func (ui *UI) layoutSubscriptionsView(gtx layout.Context) layout.Dimensions {
 							Right:  unit.Dp(24),
 							Bottom: unit.Dp(16),
 						}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-							lbl := material.Label(ui.th, unit.Sp(14), "No channels subscribed yet.")
+							lbl := ui.label(unit.Sp(14), "No channels subscribed yet.")
 							lbl.Color = ui.colors.Text2
 							return lbl.Layout(gtx)
 						})
@@ -4166,7 +4186,7 @@ func (ui *UI) layoutSubscriptionsView(gtx layout.Context) layout.Dimensions {
 					}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 						return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
 							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return layoutAvatar(gtx, ui.th, sub.ChannelID, sub.Title, 36)
+								return ui.layoutAvatar(gtx, sub.ChannelID, sub.Title, 36)
 							}),
 							layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
 							layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
@@ -4174,7 +4194,7 @@ func (ui *UI) layoutSubscriptionsView(gtx layout.Context) layout.Dimensions {
 								if title == "" {
 									title = sub.ChannelID
 								}
-								lbl := material.Label(ui.th, unit.Sp(15), title)
+								lbl := ui.label(unit.Sp(15), title)
 								lbl.Font.Weight = font.Medium
 								lbl.Color = ui.colors.Text
 								return lbl.Layout(gtx)
@@ -4202,7 +4222,7 @@ func (ui *UI) layoutSubscriptionsView(gtx layout.Context) layout.Dimensions {
 												Left:   unit.Dp(14),
 												Right:  unit.Dp(14),
 											}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-												lbl := material.Label(ui.th, unit.Sp(13), "Subscribed")
+												lbl := ui.label(unit.Sp(13), "Subscribed")
 												lbl.Color = ui.colors.Text
 												lbl.Font.Weight = font.Medium
 												return lbl.Layout(gtx)
@@ -4253,7 +4273,7 @@ func (ui *UI) layoutSettingChip(gtx layout.Context, click *widget.Clickable, tit
 					Left:   unit.Dp(12),
 					Right:  unit.Dp(12),
 				}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-					lbl := material.Label(ui.th, unit.Sp(13), title)
+					lbl := ui.label(unit.Sp(13), title)
 					lbl.Color = chipFg
 					if isSelected {
 						lbl.Font.Weight = font.Medium
@@ -4388,19 +4408,19 @@ func (ui *UI) layoutSuggestionsDropdown(gtx layout.Context) layout.Dimensions {
 				layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					if prefixStr == "" {
-						lbl := material.Label(ui.th, unit.Sp(14), restStr)
+						lbl := ui.label(unit.Sp(14), restStr)
 						lbl.Color = ui.colors.Text
 						lbl.Font.Weight = font.Medium
 						return lbl.Layout(gtx)
 					}
 					return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
 						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-							lbl := material.Label(ui.th, unit.Sp(14), prefixStr)
+							lbl := ui.label(unit.Sp(14), prefixStr)
 							lbl.Color = ui.colors.Text2
 							return lbl.Layout(gtx)
 						}),
 						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-							lbl := material.Label(ui.th, unit.Sp(14), restStr)
+							lbl := ui.label(unit.Sp(14), restStr)
 							lbl.Color = ui.colors.Text
 							lbl.Font.Weight = font.Medium
 							return lbl.Layout(gtx)
@@ -4459,7 +4479,7 @@ func (ui *UI) layoutSuggestionsDropdown(gtx layout.Context) layout.Dimensions {
 					badgeGtx := gtx
 					badgeGtx.Constraints = layout.Exact(image.Pt(badgeW, badgeH))
 					return layout.Center.Layout(badgeGtx, func(gtx layout.Context) layout.Dimensions {
-						lbl := material.Label(ui.th, unit.Sp(10), "All YouTube")
+						lbl := ui.label(unit.Sp(10), "All YouTube")
 						lbl.Color = ui.colors.Text2
 						lbl.Font.Weight = font.Bold
 						return lbl.Layout(gtx)
@@ -4467,7 +4487,7 @@ func (ui *UI) layoutSuggestionsDropdown(gtx layout.Context) layout.Dimensions {
 				}),
 				layout.Rigid(layout.Spacer{Width: unit.Dp(10)}.Layout),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					lbl := material.Label(ui.th, unit.Sp(13), fmt.Sprintf("Search all of YouTube for '%s'", query))
+					lbl := ui.label(unit.Sp(13), fmt.Sprintf("Search all of YouTube for '%s'", query))
 					lbl.Color = ui.colors.Text
 					return lbl.Layout(gtx)
 				}),
@@ -4497,7 +4517,7 @@ func (ui *UI) layoutPlaylistView(gtx layout.Context) layout.Dimensions {
 						if ui.playlistBackBtn.Hovered() {
 							pointer.CursorPointer.Add(gtx.Ops)
 						}
-						btn := material.Button(ui.th, &ui.playlistBackBtn, "← Back")
+						btn := ui.button(&ui.playlistBackBtn, "← Back")
 						btn.Background = ui.colors.Surface
 						btn.Color = ui.colors.Text
 						btn.CornerRadius = unit.Dp(16)
@@ -4508,7 +4528,7 @@ func (ui *UI) layoutPlaylistView(gtx layout.Context) layout.Dimensions {
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 						return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								lbl := material.Label(ui.th, unit.Sp(18), ui.state.CurrentPlaylist.Title)
+								lbl := ui.label(unit.Sp(18), ui.state.CurrentPlaylist.Title)
 								lbl.Font.Weight = font.Bold
 								lbl.Color = ui.colors.Text
 								return lbl.Layout(gtx)
@@ -4527,7 +4547,7 @@ func (ui *UI) layoutPlaylistView(gtx layout.Context) layout.Dimensions {
 								if info == "" {
 									return layout.Dimensions{}
 								}
-								lbl := material.Label(ui.th, unit.Sp(13), info)
+								lbl := ui.label(unit.Sp(13), info)
 								lbl.Color = ui.colors.Text2
 								return lbl.Layout(gtx)
 							}),
@@ -4543,7 +4563,7 @@ func (ui *UI) layoutPlaylistView(gtx layout.Context) layout.Dimensions {
 func (ui *UI) layoutPlaylistsGrid(gtx layout.Context) layout.Dimensions {
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			lbl := material.Label(ui.th, unit.Sp(20), "Saved Playlists")
+			lbl := ui.label(unit.Sp(20), "Saved Playlists")
 			lbl.Font.Weight = font.Bold
 			lbl.Color = ui.colors.Text
 			return lbl.Layout(gtx)
@@ -4557,7 +4577,7 @@ func (ui *UI) layoutPlaylistsGrid(gtx layout.Context) layout.Dimensions {
 				} else if ui.account == nil || !ui.account.SignedIn() {
 					msg = "Sign in to see saved playlists"
 				}
-				lbl := material.Label(ui.th, unit.Sp(14), msg)
+				lbl := ui.label(unit.Sp(14), msg)
 				lbl.Color = ui.colors.Text2
 				return lbl.Layout(gtx)
 			}
@@ -4675,7 +4695,7 @@ func (ui *UI) layoutPlaylistRow(gtx layout.Context, rowIdx, cols, cardW, gapX in
 														Left:   unit.Dp(6),
 														Right:  unit.Dp(6),
 													}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-														lbl := material.Label(ui.th, unit.Sp(11), countStr)
+														lbl := ui.label(unit.Sp(11), countStr)
 														lbl.Color = color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff}
 														return lbl.Layout(gtx)
 													})
@@ -4690,7 +4710,7 @@ func (ui *UI) layoutPlaylistRow(gtx layout.Context, rowIdx, cols, cardW, gapX in
 					}),
 					layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						lbl := material.Label(ui.th, unit.Sp(14), pl.Title)
+						lbl := ui.label(unit.Sp(14), pl.Title)
 						lbl.Font.Weight = font.Medium
 						lbl.Color = ui.colors.Text
 						lbl.MaxLines = 2
@@ -4700,7 +4720,7 @@ func (ui *UI) layoutPlaylistRow(gtx layout.Context, rowIdx, cols, cardW, gapX in
 						if pl.Channel == "" {
 							return layout.Dimensions{}
 						}
-						lbl := material.Label(ui.th, unit.Sp(12), pl.Channel)
+						lbl := ui.label(unit.Sp(12), pl.Channel)
 						lbl.Color = ui.colors.Text2
 						return lbl.Layout(gtx)
 					}),
@@ -4878,7 +4898,7 @@ func (ui *UI) layoutAccountView(gtx layout.Context) layout.Dimensions {
 		return ui.accountList.Layout(gtx, 1, func(gtx layout.Context, _ int) layout.Dimensions {
 			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					lbl := material.Label(ui.th, unit.Sp(24), "You")
+					lbl := ui.label(unit.Sp(24), "You")
 					lbl.Font.Weight = font.Bold
 					lbl.Color = ui.colors.Text
 					return lbl.Layout(gtx)
@@ -4907,7 +4927,7 @@ func (ui *UI) layoutAccountView(gtx layout.Context) layout.Dimensions {
 									},
 									func(gtx layout.Context) layout.Dimensions {
 										return layout.Inset{Top: unit.Dp(8), Bottom: unit.Dp(8), Left: unit.Dp(14), Right: unit.Dp(14)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-											lbl := material.Label(ui.th, unit.Sp(13), "Subscriptions")
+											lbl := ui.label(unit.Sp(13), "Subscriptions")
 											lbl.Color = ui.colors.Text
 											lbl.Font.Weight = font.Medium
 											return lbl.Layout(gtx)
@@ -4930,7 +4950,7 @@ func (ui *UI) layoutAccountView(gtx layout.Context) layout.Dimensions {
 									},
 									func(gtx layout.Context) layout.Dimensions {
 										return layout.Inset{Top: unit.Dp(8), Bottom: unit.Dp(8), Left: unit.Dp(14), Right: unit.Dp(14)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-											lbl := material.Label(ui.th, unit.Sp(13), "Your Library")
+											lbl := ui.label(unit.Sp(13), "Your Library")
 											lbl.Color = ui.colors.Text
 											lbl.Font.Weight = font.Medium
 											return lbl.Layout(gtx)
@@ -4946,7 +4966,7 @@ func (ui *UI) layoutAccountView(gtx layout.Context) layout.Dimensions {
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
 						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-							lbl := material.Label(ui.th, unit.Sp(20), "Accounts")
+							lbl := ui.label(unit.Sp(20), "Accounts")
 							lbl.Font.Weight = font.Bold
 							lbl.Color = ui.colors.Text
 							return lbl.Layout(gtx)
@@ -4962,7 +4982,7 @@ func (ui *UI) layoutAccountView(gtx layout.Context) layout.Dimensions {
 							if ui.addAccountBtn.Hovered() {
 								pointer.CursorPointer.Add(gtx.Ops)
 							}
-							btn := material.Button(ui.th, &ui.addAccountBtn, btnText)
+							btn := ui.button(&ui.addAccountBtn, btnText)
 							btn.Background = ui.colors.Surface
 							btn.Color = ui.colors.Text
 							btn.CornerRadius = unit.Dp(16)
@@ -5046,7 +5066,7 @@ func (ui *UI) layoutAccountsList(gtx layout.Context) layout.Dimensions {
 							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 								return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-										lbl := material.Label(ui.th, unit.Sp(15), acc.Label)
+										lbl := ui.label(unit.Sp(15), acc.Label)
 										lbl.Font.Weight = font.Medium
 										lbl.Color = ui.colors.Text
 										return lbl.Layout(gtx)
@@ -5060,7 +5080,7 @@ func (ui *UI) layoutAccountsList(gtx layout.Context) layout.Dimensions {
 												subText = "Active • Signed out"
 											}
 										}
-										lbl := material.Label(ui.th, unit.Sp(12), subText)
+										lbl := ui.label(unit.Sp(12), subText)
 										lbl.Color = ui.colors.Text2
 										return lbl.Layout(gtx)
 									}),
@@ -5082,7 +5102,7 @@ func (ui *UI) layoutAccountsList(gtx layout.Context) layout.Dimensions {
 												},
 												func(gtx layout.Context) layout.Dimensions {
 													return layout.Inset{Top: unit.Dp(4), Bottom: unit.Dp(4), Left: unit.Dp(10), Right: unit.Dp(10)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-														lbl := material.Label(ui.th, unit.Sp(12), "Active")
+														lbl := ui.label(unit.Sp(12), "Active")
 														lbl.Color = color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff}
 														return lbl.Layout(gtx)
 													})
@@ -5092,7 +5112,7 @@ func (ui *UI) layoutAccountsList(gtx layout.Context) layout.Dimensions {
 										if sw.Hovered() {
 											pointer.CursorPointer.Add(gtx.Ops)
 										}
-										btn := material.Button(ui.th, sw, "Switch")
+										btn := ui.button(sw, "Switch")
 										btn.Background = ui.colors.SurfaceHover
 										btn.Color = ui.colors.Text
 										btn.CornerRadius = unit.Dp(14)
@@ -5105,7 +5125,7 @@ func (ui *UI) layoutAccountsList(gtx layout.Context) layout.Dimensions {
 										if so.Hovered() {
 											pointer.CursorPointer.Add(gtx.Ops)
 										}
-										btn := material.Button(ui.th, so, "Sign out")
+										btn := ui.button(so, "Sign out")
 										btn.Background = ui.colors.SurfaceHover
 										btn.Color = ui.colors.Text2
 										btn.CornerRadius = unit.Dp(14)
@@ -5118,7 +5138,7 @@ func (ui *UI) layoutAccountsList(gtx layout.Context) layout.Dimensions {
 										if rm.Hovered() {
 											pointer.CursorPointer.Add(gtx.Ops)
 										}
-										btn := material.Button(ui.th, rm, "Remove")
+										btn := ui.button(rm, "Remove")
 										btn.Background = ui.colors.SurfaceHover
 										btn.Color = ui.colors.Action
 										btn.CornerRadius = unit.Dp(14)
@@ -5155,7 +5175,7 @@ func (ui *UI) layoutAddAccountPanel(gtx layout.Context) layout.Dimensions {
 			}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						lbl := material.Label(ui.th, unit.Sp(16), "1. Use a browser profile")
+						lbl := ui.label(unit.Sp(16), "1. Use a browser profile")
 						lbl.Font.Weight = font.Medium
 						lbl.Color = ui.colors.Text
 						return lbl.Layout(gtx)
@@ -5163,7 +5183,7 @@ func (ui *UI) layoutAddAccountPanel(gtx layout.Context) layout.Dimensions {
 					layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 						if len(ui.discoveredProfiles) == 0 {
-							lbl := material.Label(ui.th, unit.Sp(13), "No browser profiles found (Chrome, Chromium, Brave, Edge, Firefox).")
+							lbl := ui.label(unit.Sp(13), "No browser profiles found (Chrome, Chromium, Brave, Edge, Firefox).")
 							lbl.Color = ui.colors.Text2
 							return lbl.Layout(gtx)
 						}
@@ -5179,7 +5199,7 @@ func (ui *UI) layoutAddAccountPanel(gtx layout.Context) layout.Dimensions {
 								if ui.addProfileClicks[idx].Hovered() {
 									pointer.CursorPointer.Add(gtx.Ops)
 								}
-								btn := material.Button(ui.th, &ui.addProfileClicks[idx], title)
+								btn := ui.button(&ui.addProfileClicks[idx], title)
 								btn.Background = ui.colors.SurfaceHover
 								btn.Color = ui.colors.Text
 								btn.CornerRadius = unit.Dp(14)
@@ -5193,14 +5213,14 @@ func (ui *UI) layoutAddAccountPanel(gtx layout.Context) layout.Dimensions {
 					layout.Rigid(layout.Spacer{Height: unit.Dp(16)}.Layout),
 
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						lbl := material.Label(ui.th, unit.Sp(16), "2. Sign in with Google")
+						lbl := ui.label(unit.Sp(16), "2. Sign in with Google")
 						lbl.Font.Weight = font.Medium
 						lbl.Color = ui.colors.Text
 						return lbl.Layout(gtx)
 					}),
 					layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						desc := material.Label(ui.th, unit.Sp(13), "Opens Chrome or Chromium in an isolated profile to sign in. When finished, close the browser.")
+						desc := ui.label(unit.Sp(13), "Opens Chrome or Chromium in an isolated profile to sign in. When finished, close the browser.")
 						desc.Color = ui.colors.Text2
 						return desc.Layout(gtx)
 					}),
@@ -5211,7 +5231,7 @@ func (ui *UI) layoutAddAccountPanel(gtx layout.Context) layout.Dimensions {
 								if ui.signInGoogleBtn.Hovered() {
 									pointer.CursorPointer.Add(gtx.Ops)
 								}
-								btn := material.Button(ui.th, &ui.signInGoogleBtn, "Sign in with Google")
+								btn := ui.button(&ui.signInGoogleBtn, "Sign in with Google")
 								btn.Background = ui.colors.Action
 								btn.Color = color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff}
 								btn.CornerRadius = unit.Dp(16)
@@ -5223,7 +5243,7 @@ func (ui *UI) layoutAddAccountPanel(gtx layout.Context) layout.Dimensions {
 								if ui.signInGoogleStatus == "" {
 									return layout.Dimensions{}
 								}
-								lbl := material.Label(ui.th, unit.Sp(13), ui.signInGoogleStatus)
+								lbl := ui.label(unit.Sp(13), ui.signInGoogleStatus)
 								lbl.Color = ui.colors.Text2
 								if strings.HasPrefix(ui.signInGoogleStatus, "Error") {
 									lbl.Color = ui.colors.Accent
@@ -5277,7 +5297,7 @@ func (ui *UI) layoutSettingsSection(gtx layout.Context) layout.Dimensions {
 
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			lbl := material.Label(ui.th, unit.Sp(20), "Settings")
+			lbl := ui.label(unit.Sp(20), "Settings")
 			lbl.Font.Weight = font.Bold
 			lbl.Color = ui.colors.Text
 			return lbl.Layout(gtx)
@@ -5285,7 +5305,7 @@ func (ui *UI) layoutSettingsSection(gtx layout.Context) layout.Dimensions {
 		layout.Rigid(layout.Spacer{Height: unit.Dp(16)}.Layout),
 
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			lbl := material.Label(ui.th, unit.Sp(14), "Codec")
+			lbl := ui.label(unit.Sp(14), "Codec")
 			lbl.Font.Weight = font.Medium
 			lbl.Color = ui.colors.Text
 			return lbl.Layout(gtx)
@@ -5309,14 +5329,14 @@ func (ui *UI) layoutSettingsSection(gtx layout.Context) layout.Dimensions {
 		layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			gpuText := formatGPUDecodes(ui.cachedCaps, ui.capsLoaded, ui.capsErr)
-			lbl := material.Label(ui.th, unit.Sp(13), gpuText)
+			lbl := ui.label(unit.Sp(13), gpuText)
 			lbl.Color = ui.colors.Text2
 			return lbl.Layout(gtx)
 		}),
 		layout.Rigid(layout.Spacer{Height: unit.Dp(20)}.Layout),
 
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			lbl := material.Label(ui.th, unit.Sp(14), "Player")
+			lbl := ui.label(unit.Sp(14), "Player")
 			lbl.Font.Weight = font.Medium
 			lbl.Color = ui.colors.Text
 			return lbl.Layout(gtx)
@@ -5336,7 +5356,7 @@ func (ui *UI) layoutSettingsSection(gtx layout.Context) layout.Dimensions {
 		layout.Rigid(layout.Spacer{Height: unit.Dp(20)}.Layout),
 
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			lbl := material.Label(ui.th, unit.Sp(14), "Login browser")
+			lbl := ui.label(unit.Sp(14), "Login browser")
 			lbl.Font.Weight = font.Medium
 			lbl.Color = ui.colors.Text
 			return lbl.Layout(gtx)
@@ -5359,7 +5379,7 @@ func (ui *UI) layoutSettingsSection(gtx layout.Context) layout.Dimensions {
 						Left:   unit.Dp(14),
 						Right:  unit.Dp(14),
 					}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-						ed := material.Editor(ui.th, &ui.accountBrowserEditor, yt.DefaultBrowserSpec())
+						ed := ui.editor(&ui.accountBrowserEditor, yt.DefaultBrowserSpec())
 						ed.Color = ui.colors.Text
 						ed.HintColor = ui.colors.Text2
 						ed.TextSize = unit.Sp(13)
@@ -5388,7 +5408,7 @@ func (ui *UI) layoutEmptyState(gtx layout.Context) layout.Dimensions {
 	}
 
 	return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		lbl := material.Label(ui.th, unit.Sp(14), msg)
+		lbl := ui.label(unit.Sp(14), msg)
 		lbl.Color = ui.colors.Text2
 		return lbl.Layout(gtx)
 	})
@@ -5418,7 +5438,7 @@ func (ui *UI) layoutStatusBar(gtx layout.Context) layout.Dimensions {
 				Left:   unit.Dp(16),
 				Right:  unit.Dp(16),
 			}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				lbl := material.Label(ui.th, unit.Sp(12), ui.state.Status)
+				lbl := ui.label(unit.Sp(12), ui.state.Status)
 				lbl.Color = ui.colors.Text2
 				lbl.MaxLines = 1
 				lbl.Truncator = "…"
@@ -5939,7 +5959,7 @@ func (ui *UI) layoutControlsBar(gtx layout.Context, widthPx int) layout.Dimensio
 					layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 						timeStr := formatPlaybackTime(ui.watchCurrentTime, ui.watchDuration)
-						lbl := material.Label(ui.th, unit.Sp(13), timeStr)
+						lbl := ui.label(unit.Sp(13), timeStr)
 						lbl.Color = ui.colors.Text
 						return lbl.Layout(gtx)
 					}),
@@ -5984,7 +6004,7 @@ func (ui *UI) layoutVideoDetails(gtx layout.Context, v yt.Video, widthPx int) la
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		// Title: 20 sp medium, max 2 lines
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			lbl := material.Label(ui.th, unit.Sp(20), v.Title)
+			lbl := ui.label(unit.Sp(20), v.Title)
 			lbl.Font.Weight = font.Medium
 			lbl.Color = ui.colors.Text
 			lbl.MaxLines = 2
@@ -6000,11 +6020,11 @@ func (ui *UI) layoutVideoDetails(gtx layout.Context, v yt.Video, widthPx int) la
 				Alignment: layout.Middle,
 			}.Layout(gtx,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					return layoutAvatar(gtx, ui.th, v.ChannelID, v.Channel, 36)
+					return ui.layoutAvatar(gtx, v.ChannelID, v.Channel, 36)
 				}),
 				layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					lbl := material.Label(ui.th, unit.Sp(16), v.Channel)
+					lbl := ui.label(unit.Sp(16), v.Channel)
 					lbl.Font.Weight = font.Medium
 					lbl.Color = ui.colors.Text
 					return lbl.Layout(gtx)
@@ -6020,7 +6040,7 @@ func (ui *UI) layoutVideoDetails(gtx layout.Context, v yt.Video, widthPx int) la
 						btnBg = ui.colors.Surface
 						btnFg = ui.colors.Text
 					}
-					btn := material.Button(ui.th, &ui.watchSubscribeClick, label)
+					btn := ui.button(&ui.watchSubscribeClick, label)
 					btn.Background = btnBg
 					btn.Color = btnFg
 					btn.CornerRadius = unit.Dp(18)
@@ -6029,7 +6049,7 @@ func (ui *UI) layoutVideoDetails(gtx layout.Context, v yt.Video, widthPx int) la
 				}),
 				layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					btn := material.Button(ui.th, &ui.watchLaterClick, "Watch later")
+					btn := ui.button(&ui.watchLaterClick, "Watch later")
 					btn.Background = ui.colors.Surface
 					btn.Color = ui.colors.Text
 					btn.CornerRadius = unit.Dp(18)
@@ -6038,7 +6058,7 @@ func (ui *UI) layoutVideoDetails(gtx layout.Context, v yt.Video, widthPx int) la
 				}),
 				layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					btn := material.Button(ui.th, &ui.watchExternalMPVClick, "mpv")
+					btn := ui.button(&ui.watchExternalMPVClick, "mpv")
 					btn.Background = ui.colors.Surface
 					btn.Color = ui.colors.Text
 					btn.CornerRadius = unit.Dp(18)
@@ -6067,7 +6087,7 @@ func (ui *UI) layoutVideoDetails(gtx layout.Context, v yt.Video, widthPx int) la
 						metaText := FormatMetaLine(v.ViewCount, v.UploadDate, v.PublishedAt, time.Now())
 						return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								lbl := material.Label(ui.th, unit.Sp(14), metaText)
+								lbl := ui.label(unit.Sp(14), metaText)
 								lbl.Font.Weight = font.Medium
 								lbl.Color = ui.colors.Text
 								return lbl.Layout(gtx)
@@ -6077,7 +6097,7 @@ func (ui *UI) layoutVideoDetails(gtx layout.Context, v yt.Video, widthPx int) la
 									return layout.Dimensions{}
 								}
 								return layout.Inset{Top: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-									desc := material.Label(ui.th, unit.Sp(13), v.Description)
+									desc := ui.label(unit.Sp(13), v.Description)
 									desc.Color = ui.colors.Text
 									desc.MaxLines = 6
 									desc.Truncator = "…"
@@ -6131,7 +6151,7 @@ func (ui *UI) layoutUpNextList(gtx layout.Context, widthPx int) layout.Dimension
 
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			lbl := material.Label(ui.th, unit.Sp(16), "Up next")
+			lbl := ui.label(unit.Sp(16), "Up next")
 			lbl.Font.Weight = font.Bold
 			lbl.Color = ui.colors.Text
 			return layout.Inset{Bottom: unit.Dp(12)}.Layout(gtx, lbl.Layout)
@@ -6159,7 +6179,7 @@ func (ui *UI) layoutUpNextList(gtx layout.Context, widthPx int) layout.Dimension
 							layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 								return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-										lbl := material.Label(ui.th, unit.Sp(14), v.Title)
+										lbl := ui.label(unit.Sp(14), v.Title)
 										lbl.Font.Weight = font.Medium
 										lbl.Color = ui.colors.Text
 										lbl.MaxLines = 2
@@ -6168,7 +6188,7 @@ func (ui *UI) layoutUpNextList(gtx layout.Context, widthPx int) layout.Dimension
 									}),
 									layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
 									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-										lbl := material.Label(ui.th, unit.Sp(12), v.Channel)
+										lbl := ui.label(unit.Sp(12), v.Channel)
 										lbl.Color = ui.colors.Text2
 										lbl.MaxLines = 1
 										return lbl.Layout(gtx)
@@ -6176,7 +6196,7 @@ func (ui *UI) layoutUpNextList(gtx layout.Context, widthPx int) layout.Dimension
 									layout.Rigid(layout.Spacer{Height: unit.Dp(2)}.Layout),
 									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 										metaText := FormatMetaLine(v.ViewCount, v.UploadDate, v.PublishedAt, time.Now())
-										lbl := material.Label(ui.th, unit.Sp(12), metaText)
+										lbl := ui.label(unit.Sp(12), metaText)
 										lbl.Color = ui.colors.Text2
 										return lbl.Layout(gtx)
 									}),
@@ -6231,7 +6251,7 @@ func (ui *UI) layoutSubsChannelsRow(gtx layout.Context) layout.Dimensions {
 	}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				lbl := material.Label(ui.th, unit.Sp(16), "Channels")
+				lbl := ui.label(unit.Sp(16), "Channels")
 				lbl.Font.Weight = font.Bold
 				lbl.Color = ui.colors.Text
 				return layout.Inset{Bottom: unit.Dp(8)}.Layout(gtx, lbl.Layout)
@@ -6278,12 +6298,12 @@ func (ui *UI) layoutSubsChannelsRow(gtx layout.Context) layout.Dimensions {
 										}
 										ui.thumbs.RequestAvatar(item.avatarURL)
 									}
-									return layoutAvatar(gtx, ui.th, item.id, item.title, 64)
+									return ui.layoutAvatar(gtx, item.id, item.title, 64)
 								}),
 								layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
 								// Channel name: 12 sp, 1 line, ellipsis
 								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-									lbl := material.Label(ui.th, unit.Sp(12), item.title)
+									lbl := ui.label(unit.Sp(12), item.title)
 									lbl.Color = ui.colors.Text
 									lbl.MaxLines = 1
 									lbl.Truncator = "…"

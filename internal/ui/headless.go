@@ -133,13 +133,7 @@ func RenderPNG(opts Options, sizeStr, outPath string) error {
 		// Check if visible images are loaded
 		allReady := false
 		if opts.Demo {
-			allReady = true
-			for _, fn := range DemoFiles {
-				if _, ok := demo.CachedImage(fn); !ok {
-					allReady = false
-					break
-				}
-			}
+			allReady = len(ui.demoLoading) == 0
 		} else {
 			ui.requestedMu.Lock()
 			reqEmpty := len(ui.requested) == 0

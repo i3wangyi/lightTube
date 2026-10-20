@@ -59,14 +59,13 @@ func main() {
 }
 
 func run(args []string) error {
-	// During playback the Go heap held 150-180 MB of pages while about 40 MB
-	// was live: Gio rebuilds vertex and stroke data on each redraw (about
-	// 9 MB/s), and the GC lets the heap grow. A soft limit makes it return
-	// pages. Measured: 96 MiB costs no CPU; 64 MiB made GC use ~35% of a core.
-	// GOMEMLIMIT overrides.
-	if os.Getenv("GOMEMLIMIT") == "" {
+	// Keep the existing soft limit unless the user supplied a GC policy.
+	_, hasLimit := os.LookupEnv("GOMEMLIMIT")
+	_, hasGC := os.LookupEnv("GOGC")
+	if !hasLimit && !hasGC {
 		rdebug.SetMemoryLimit(96 << 20)
 	}
+
 	var demo bool
 	var debug bool
 	var debugSize string

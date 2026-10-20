@@ -1,9 +1,10 @@
 package ui
 
 import (
-	"bytes"
 	"image/color"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"gioui.org/font"
 	"gioui.org/font/opentype"
@@ -80,65 +81,108 @@ func (r rawFontFace) Face() *fontapi.Face {
 	return fontapi.NewFace(r.face)
 }
 
-// loadExplicitFonts loads standard platform fonts without scanning all system fonts.
-func loadExplicitFonts() []font.FontFace {
-	paths := platform.FontFiles()
-
-	var allFaces []font.FontFace
-	for _, p := range paths {
-		data, err := os.ReadFile(p)
-		if err != nil {
-			continue
-		}
-
-		// In TTC font collections (such as NotoSansCJK-Regular.ttc with 10 regional faces),
-		// opentype.ParseCollection parses all 10 faces into memory (costing ~185 MB heap).
-		// Inspect loaders to parse only the single face needed (Noto Sans CJK SC).
-		lds, err := ot.NewLoaders(bytes.NewReader(data))
-		if err == nil && len(lds) > 1 {
-			nameTag := ot.MustNewTag("name")
-			var targetLd *ot.Loader
-			for _, ld := range lds {
-				buf, err := ld.RawTable(nameTag)
-				if err != nil {
-					continue
-				}
-				names, _, err := tables.ParseName(buf)
-				if err != nil {
-					continue
-				}
-				if names.Name(1) == "Noto Sans CJK SC" || names.Name(4) == "Noto Sans CJK SC" {
-					targetLd = ld
-					break
-				}
-			}
-			if targetLd == nil {
-				targetLd = lds[0]
-			}
-			ft, err := fontapi.NewFont(targetLd)
-			if err == nil {
-				allFaces = append(allFaces, font.FontFace{
-					Font: opentype.DescriptionToFont(ft.Describe()),
-					Face: rawFontFace{face: ft},
-				})
-			}
-			continue
-		}
-
-		faces, err := opentype.ParseCollection(data)
-		if err != nil {
-			continue
-		}
-		allFaces = append(allFaces, faces...)
+// loadFontFile reads only one face's tables; a TTC can contain ten large faces.
+func loadFontFile(path string) []font.FontFace {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
 	}
-	return allFaces
+	defer f.Close()
+	lds, err := ot.NewLoaders(f)
+	if err != nil || len(lds) == 0 {
+		return nil
+	}
+	target := lds[0]
+	if len(lds) > 1 {
+		for _, ld := range lds {
+			buf, err := ld.RawTable(ot.MustNewTag("name"))
+			if err != nil {
+				continue
+			}
+			names, _, err := tables.ParseName(buf)
+			if err == nil && (names.Name(1) == "Noto Sans CJK SC" || names.Name(4) == "Noto Sans CJK SC") {
+				target = ld
+				break
+			}
+		}
+	}
+	ft, err := fontapi.NewFont(target)
+	if err != nil {
+		return nil
+	}
+	return []font.FontFace{{Font: opentype.DescriptionToFont(ft.Describe()), Face: rawFontFace{face: ft}}}
+}
+
+func loadExplicitFonts() []font.FontFace {
+	var faces []font.FontFace
+	for _, path := range platform.FontFiles() {
+		faces = append(faces, loadFontFile(path)...)
+	}
+	return faces
+}
+
+// themeFonts defers collection faces until displayed text needs a fallback.
+// Gio opens every registered face eagerly, so registration itself must wait.
+type themeFonts struct {
+	faces    []font.FontFace
+	fallback []string
+}
+
+func (f *themeFonts) ensure(th *material.Theme, value string) {
+	if f == nil || len(f.fallback) == 0 {
+		return
+	}
+	for _, r := range value {
+		if r <= ' ' {
+			continue
+		}
+		found := false
+		for _, face := range f.faces {
+			if _, ok := face.Face.(rawFontFace).face.Cmap.Lookup(r); ok {
+				found = true
+				break
+			}
+		}
+		if found {
+			continue
+		}
+		for _, path := range f.fallback {
+			f.faces = append(f.faces, loadFontFile(path)...)
+		}
+		f.fallback = nil
+		th.Shaper = text.NewShaper(text.NoSystemFonts(), text.WithCollection(f.faces))
+		return
+	}
+}
+
+func newLazyDarkTheme() (*material.Theme, ThemeColors, *themeFonts) {
+	f := &themeFonts{}
+	for _, path := range platform.FontFiles() {
+		if strings.EqualFold(filepath.Ext(path), ".ttc") {
+			f.fallback = append(f.fallback, path)
+		} else {
+			f.faces = append(f.faces, loadFontFile(path)...)
+		}
+	}
+	// Retain the system font fallback when explicit platform fonts are absent.
+	if len(f.faces) == 0 {
+		for _, path := range f.fallback {
+			f.faces = append(f.faces, loadFontFile(path)...)
+		}
+		f.fallback = nil
+	}
+	th, colors := darkTheme(f.faces)
+	return th, colors, f
 }
 
 // NewDarkTheme initializes a material Theme configured with dark palette colors
 // and an explicit font collection, disabling full system font scanning for sub-500ms startup.
 // When no explicit font files are found, it falls back to Gio's system font scan.
 func NewDarkTheme() (*material.Theme, ThemeColors) {
-	faces := loadExplicitFonts()
+	return darkTheme(loadExplicitFonts())
+}
+
+func darkTheme(faces []font.FontFace) (*material.Theme, ThemeColors) {
 	var shaper *text.Shaper
 	if len(faces) > 0 {
 		shaper = text.NewShaper(text.NoSystemFonts(), text.WithCollection(faces))

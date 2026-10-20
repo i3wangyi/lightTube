@@ -5,6 +5,7 @@ import (
 	"embed"
 	"fmt"
 	"image"
+	"image/draw"
 	_ "image/jpeg"
 	"io/fs"
 	"sync"
@@ -77,7 +78,14 @@ func GetImage(filename string) (image.Image, error) {
 		return nil, fmt.Errorf("decoding demo image %s: %w", filename, err)
 	}
 
+	// Share the decoded pixels with Gio instead of retaining both YCbCr and RGBA.
+	rgba := image.NewRGBA(img.Bounds())
+	draw.Draw(rgba, rgba.Bounds(), img, img.Bounds().Min, draw.Src)
+	img = rgba
 	cacheMu.Lock()
+	if existing, ok := cache[filename]; ok {
+		img = existing
+	}
 	cache[filename] = img
 	cacheMu.Unlock()
 

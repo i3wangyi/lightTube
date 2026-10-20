@@ -11,7 +11,6 @@ import (
 	"gioui.org/op/clip"
 	"gioui.org/op/paint"
 	"gioui.org/unit"
-	"gioui.org/widget/material"
 )
 
 // channelAvatarColor computes a deterministic, vibrant background color from a channel ID.
@@ -49,7 +48,7 @@ func channelInitial(title string) string {
 }
 
 // layoutAvatar draws a solid circle with the channel's initial letter in white.
-func layoutAvatar(gtx layout.Context, th *material.Theme, channelID, channelTitle string, sizeDp int) layout.Dimensions {
+func (ui *UI) layoutAvatar(gtx layout.Context, channelID, channelTitle string, sizeDp int) layout.Dimensions {
 	sizePx := gtx.Dp(unit.Dp(sizeDp))
 	box := image.Pt(sizePx, sizePx)
 	gtx.Constraints.Min = box
@@ -68,7 +67,7 @@ func layoutAvatar(gtx layout.Context, th *material.Theme, channelID, channelTitl
 	}
 
 	return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		lbl := material.Label(th, spSize, initial)
+		lbl := ui.label(spSize, initial)
 		lbl.Color = color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff}
 		lbl.Font.Weight = 600
 		return lbl.Layout(gtx)
