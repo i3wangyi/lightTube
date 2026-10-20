@@ -1,0 +1,101 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install build libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libxcursor-dev libxfixes-dev libegl1-mesa-dev libvulkan-dev libmpv-dev
+      - name: Build Linux archive
+        # novulkan: the OpenGL path is the one measured and tested; Gio's
+        # Vulkan backend used far more memory on the reference laptop.
+        run: make dist GO=go VERSION="${GITHUB_REF_NAME}" TAGS=novulkan
+      - name: Upload Linux archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-release
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build Windows archive
+        shell: pwsh
+        run: .\scripts\package-windows.ps1
+      - name: Upload Windows archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          path: dist/*.zip
+          if-no-files-found: error
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install SVG icon tool
+        run: brew install librsvg
+      - name: Build macOS app
+        run: |
+          go build -trimpath -ldflags="-s -w -X main.version=${GITHUB_REF_NAME}" -o lighttube ./cmd/lighttube
+          ./scripts/package-macos.sh "${GITHUB_REF_NAME}"
+      - name: Upload macOS archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-release
+          path: dist/*.zip
+          if-no-files-found: error
+
+  publish:
+    needs: [linux, windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: '*-release'
+          path: dist
+          merge-multiple: true
+      - name: Create SHA256SUMS
+        run: cd dist && sha256sum *.tar.gz *.zip > SHA256SUMS
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2.0.8
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SHA256SUMS
+          generate_release_notes: true

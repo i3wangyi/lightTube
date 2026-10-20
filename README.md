@@ -1,52 +1,79 @@
 # lightTube
 
-lightTube is a fast, lightweight YouTube desktop client for Linux (Wayland). It is built for low CPU, memory, and heat usage on resource-constrained hardware. Videos play with hardware-accelerated VA-API decoding, either inside the window (libmpv in a Wayland subsurface) or in an external mpv window.
+lightTube is a YouTube desktop client. It has four spaces: Watch, Shorts, Podcasts, and Music. It supports accounts, playlists, search typeahead, and in-window video playback on Linux. Playback can also use an external mpv window.
 
-## Requirements
+## Runtime requirements
 
-- Go 1.27 managed via mise (`mise exec -- go ...`)
-- Gio build dependencies (Wayland, OpenGL/EGL, fontconfig)
-- `mpv` with `libmpv.so.2`
-- `yt-dlp` (for YouTube search and metadata extraction)
-- Wayland and EGL development libraries (`wayland-client`, `wayland-egl`, `egl`)
-- `python-secretstorage` (for extracting YouTube cookies from Google Chrome on Linux using GNOME Keyring)
+- Linux: Wayland or X11, `mpv` with `libmpv.so.2`, and `yt-dlp`.
+- macOS: `libmpv` and `yt-dlp` from Homebrew. The app uses an external mpv window.
+- Windows: `yt-dlp.exe` on `PATH`. Add `mpv-2.dll` beside `lighttube.exe` for in-window playback.
+- Account sign-in reads a browser session through yt-dlp. Cookies stay on the local device. yt-dlp reads the saved cookie file for account feeds and playback.
 
-## Build and Install
+## Install
 
-Build the application:
+### Linux tarball
+
+Download and extract the Linux x86_64 archive from [Releases](https://github.com/i3wangyi/lightTube/releases). Run:
+
 ```sh
-make
+./install.sh
 ```
 
-Build tags are automatically detected:
-- `novulkan`: applied when `/usr/include/vulkan/vulkan.h` is missing.
-- `nox11`: applied when X11 libraries (`x11-xcb`, `xkbcommon-x11`, `xcursor`) are missing from `pkg-config`.
-- To override auto-detected tags: `make build TAGS=novulkan,nox11`.
+The installer uses `~/.local` by default. Set `PREFIX` to choose another prefix. Run `PREFIX="$HOME/.local" ./install.sh --uninstall` to remove the installed files.
 
-Run checks (`gofmt`, `go vet`, and tests):
-```sh
-make check
-```
+### Arch Linux
 
-Install binary, desktop file, and icon (defaults to `PREFIX ?= $(HOME)/.local`):
+Download `packaging/arch/PKGBUILD` and `packaging/arch/.SRCINFO` from the source tree. From that directory, run `makepkg -si`.
+
+### Build from source
+
+Install Go 1.27 through mise and the Gio, Wayland, EGL, X11, fontconfig, and mpv development libraries. Then run:
+
 ```sh
+make build
 make install
 ```
 
-To install to a different prefix:
+`make install` installs under `~/.local` by default. Use `make install PREFIX=/usr/local` to select another prefix. Run `make check` to run formatting, vet, and Go tests.
+
+### macOS app
+
+Download and unzip the macOS arm64 app archive from [Releases](https://github.com/i3wangyi/lightTube/releases). Install the runtime libraries:
+
 ```sh
-make install PREFIX=/usr/local
+brew install mpv yt-dlp
 ```
 
-Uninstall:
-```sh
-make uninstall
-```
+The app is unsigned. On first open, Control-click `lightTube.app`, select **Open**, then confirm **Open** in the dialog. macOS can block a direct double-click because the app is unsigned. Playback opens in external mpv.
 
-Clean build artifacts:
-```sh
-make clean
-```
+### Windows zip
+
+Download and unzip the Windows x86_64 archive from [Releases](https://github.com/i3wangyi/lightTube/releases). Install `yt-dlp.exe` and add it to `PATH`. For in-window playback, place `mpv-2.dll` beside `lighttube.exe`. Install mpv for external playback.
+
+## Features
+
+- Four spaces: Watch, Shorts, Podcasts, and Music.
+- Local account support with YouTube feeds, saved playlists, and watch history.
+- Search suggestions while typing.
+- In-window playback on supported Linux systems; external mpv playback on all platforms.
+- Local channel subscriptions and Watch later list.
+
+## Keyboard shortcuts
+
+| Shortcut | Action |
+| --- | --- |
+| `Alt+1` to `Alt+4` | Switch between the four spaces |
+| `Ctrl+1` to `Ctrl+5` | Switch tabs |
+| `Ctrl+L` | Focus search |
+| `Ctrl+V` | Paste and play a YouTube URL |
+| `Enter` | Search or play the selected item |
+| `Space` or `K` | Play or pause |
+| `J` / `L` | Seek backward / forward 10 seconds |
+| `Left` / `Right` | Seek backward / forward 5 seconds |
+| `M` | Mute or unmute |
+| `F` | Toggle fullscreen |
+| `Esc` | Exit fullscreen or close the watch page |
+| `O` | Open the current video in external mpv |
 
 ## Hyprland Integration
 
@@ -67,48 +94,24 @@ To load this configuration:
 1. Copy or symlink `contrib/hyprland.lua` to `~/.config/hypr/lighttube.lua` and add `require("lighttube")` in `~/.config/hypr/hyprland.lua`, or
 2. Paste the snippet directly into `~/.config/hypr/bindings.lua`.
 
-## Usage
-
-YouTube Music is not directly supported by yt-dlp. The Music space uses the
-available YouTube Music playlist and search endpoints, which can change upstream.
-
-### GUI Shortcuts
-
-| Key | Action |
-| --- | --- |
-| `Ctrl+1..5` | Switch pages (Home, Subscriptions, Watch later, History, You/Account) |
-| `Ctrl+L` | Focus the search box |
-| `Ctrl+V` | Paste and play a YouTube URL |
-| `Enter` (in search) | Execute search (or play if input is a video URL) |
-| `Up` / `Down` / Arrows | Navigate cards or search list |
-| `Enter` | Play selected video |
-| `A` | Play selected video (audio only) |
-| `W` | Toggle Watch later for selected video |
-| `Space` / `K` | Play / pause toggle |
-| `J` / `L` | Seek backward / forward 10 seconds |
-| `Left` / `Right` | Seek backward / forward 5 seconds |
-| `M` | Mute / unmute audio |
-| `F` | Toggle fullscreen |
-| `Esc` | Leave fullscreen, clear search, or exit watch page |
-| `O` | Open current video in external mpv window |
-| Click | Play video from card or search result |
-| Double Click (video) | Toggle fullscreen |
-
-### CLI Subcommands and Flags
+## Command line
 
 - `lighttube [--external-player] [--debug]`:
   Launch the graphical interface. `--external-player` opens video playback in an external mpv window rather than using the embedded player. `--debug` enables verbose logging.
-  `--debug-sequence "music:play,wait:8,podcasts:play,wait:8,music:show,wait:4,music:play,wait:8"` runs native verification through the UI handlers. `play` selects the first loaded item, or uses the dock Play handler when that space has a resume item. `show` switches spaces without starting playback. `wait` uses seconds. `podcasts:play:show=2` plays the first episode of the second followed show (the show number starts at 1); this step fetches one episode instead of the full archive. Each completed step logs the active space, player owner, dock item, video rectangle, mute, pause, and playback position. This flag does not send desktop input.
+  `--demo` starts with built-in sample data: no account, no network and no playback.
+  `--demo --space <watch|shorts|podcasts|music> --render-png WxH out.png` renders one screen to a PNG without opening a window.
+  `--debug-sequence <steps>` is a developer tool that runs UI steps (for example `music:play,wait:8`) through the normal click handlers.
 - `lighttube play <url> [--audio]`:
   Play a video directly from URL. `--audio` plays audio only with format `ba`.
 - `lighttube search <query>`:
   Search YouTube videos and output results (`ID`, `Title`, `Channel`, `Duration`).
 - `lighttube feed [--account home|subs|later|history]`:
   Without `--account`, output the merged feed of local subscriptions. With `--account`, output the signed-in YouTube feed (`home`, `subs`, `later`, or `history`).
-- `lighttube account <signin|signout|status>`:
-  - `signin`: Extract YouTube cookies from Chrome session.
-  - `signout`: Delete saved cookies.
-  - `status`: Show authentication status (`signed in` or `signed out`).
+- `lighttube account <signin|signout|status|list|switch <id>|remove <id>>`:
+  - `signin`: Read YouTube cookies from the active account's browser profile.
+  - `signout`: Delete the active account's saved cookies.
+  - `status`: Show whether the active account is signed in.
+  - `list`, `switch <id>`, `remove <id>`: Manage several accounts.
 - `lighttube sub <add|list>`:
   - `lighttube sub add <url|@handle|UC id>`: Resolve channel and add to local subscriptions.
   - `lighttube sub list`: Print local subscriptions (`ChannelID`, `Title`, `URL`).
@@ -132,8 +135,9 @@ Settings can be changed graphically on the "You" page (Ctrl+5).
 
 ## Account and Data Storage
 
-Authentication uses an existing Google Chrome login session on the machine. There is no OAuth sign-in and no API key.
-- Sign-in extracts session cookies using `yt-dlp --cookies-from-browser chrome+gnomekeyring`.
+Authentication uses a browser login session on the machine through yt-dlp. There is no OAuth sign-in and no API key.
+- You can add several Google accounts on the You page: sign in through an isolated browser profile, or pick an existing Chrome, Chromium, Brave, Edge or Firefox profile. Switch, sign out or remove accounts there or with `lighttube account list|switch|remove`.
+- Sign-in extracts session cookies with `yt-dlp --cookies-from-browser <browser>`; the default on Linux is `chrome+gnomekeyring`.
 - Storage locations:
   - `~/.local/share/lighttube/settings.json`: Application configuration.
   - `~/.local/share/lighttube/cookies.txt`: Netscape cookie file, written with file mode `0600` (readable only by the owner). Cookie values are never logged or printed.
@@ -145,16 +149,16 @@ Authentication uses an existing Google Chrome login session on the machine. Ther
   - `~/.cache/lighttube/feeds/<channel_id>.xml`: Cached RSS feeds (15-minute TTL).
   - `~/.cache/lighttube/account/<kind>.json`: Cached account feeds.
 
-## Performance Facts
+## Performance
 
-Measured on a MacBookPro12,1 (Intel Broadwell, Iris 6100) in October 2026:
+Measured on a MacBookPro12,1 (Intel Broadwell, Iris 6100) in October 2026, signed in, window 1200x760 at scale 2:
 - The GPU decodes H.264 only, so lightTube asks for H.264 up to 1080p.
 - 1080p30 playback in the window: about 15% of one CPU core (`hwdec-current=vaapi`).
   External mpv: about 20%. The same video in Google Chrome: about 95%.
-- Startup to first frame: about 200 to 250 ms.
+- Startup to first frame: about 60 to 200 ms.
 - Idle CPU with the window open: about 0%. The window draws only on events.
-- Memory (RSS): about 115 MB idle. This is above the 90 MB target in SPEC.md.
-- At most 100 decoded thumbnails are kept in memory.
+- Memory (RSS) 25 s after start, with thumbnails drawn: about 100 to 112 MiB
+  (demo mode: about 90 MiB). The target in SPEC.md is 128 MB.
 
 ## Platform Support
 
@@ -167,22 +171,32 @@ Measured on a MacBookPro12,1 (Intel Broadwell, Iris 6100) in October 2026:
 
 ### macOS Note
 
-On macOS, the app falls back to the external mpv player automatically. A native bundled macOS application (`.app`) and in-window NSView embedded player are planned for a later phase.
-
-## Distribution and Packaging
-
-- **Linux Tarball**: Run `make dist` to create `dist/lighttube-<version>-linux-<arch>.tar.gz`. The tarball contains the `lighttube` binary, `contrib/lighttube.desktop`, `contrib/lighttube.svg`, `contrib/hyprland.lua`, `README.md`, and `install.sh` (installs to `~/.local` identically to `make install`).
-- **Windows Zip**: Run `powershell -ExecutionPolicy Bypass -File scripts/package-windows.ps1` to produce `dist/lighttube-<version>-windows-x86_64.zip`. To enable embedded playback on Windows, download `mpv-2.dll` and place it in the same folder as `lighttube.exe`.
-
-## Continuous Integration
-
-GitHub Actions workflow (`.github/workflows/ci.yml`) runs on push and pull requests across three platforms:
-1. `ubuntu-latest`: Installs development headers (`libwayland-dev`, `libx11-xcb-dev`, `libxkbcommon-x11-dev`, `libxcursor-dev`, `libxfixes-dev`, `libegl1-mesa-dev`, `libvulkan-dev`, `libmpv-dev`) and runs `make check`.
-2. `windows-latest`: Builds without cgo (`CGO_ENABLED=0`) and runs `go vet ./...`.
-3. `macos-latest`: Builds `./cmd/lighttube` and runs tests on non-GUI packages.
-
-When git tags matching `v*` are pushed, release artifacts from `make dist` (Linux) and the Windows zip are automatically uploaded.
+On macOS, playback uses the external mpv player. The release has an unsigned `lightTube.app`; in-window playback on macOS is not written yet.
 
 ## Known Limits
 
 - No emoji font: Renders Latin and CJK characters using system Noto fonts, but emoji glyphs are not displayed.
+- YouTube Music is not directly supported by yt-dlp. The Music space uses YouTube Music playlist and search endpoints, which can change upstream.
+- YouTube offers this app no Shorts recommendation feed. The Shorts space shows Shorts from followed channels and Shorts search.
+- In windows narrower than about 600 dp, the Podcasts and Music player dock takes most of the height.
+- The Windows and macOS builds are packaged by CI but have not been run by the author.
+
+## Privacy and affiliation
+
+lightTube is not affiliated with YouTube. Cookies stay on your device. yt-dlp reads them to access account feeds and play account-restricted content. lightTube does not print cookie values.
+
+## Demo screenshots
+
+These screenshots use demo data only. They do not show live YouTube content. Stock photo sources are listed in [internal/demo/ASSETS.md](internal/demo/ASSETS.md).
+
+| Watch | Shorts |
+| --- | --- |
+| ![Watch space](docs/screenshots/watch.png) | ![Shorts space](docs/screenshots/shorts.png) |
+
+| Podcasts | Music |
+| --- | --- |
+| ![Podcasts space](docs/screenshots/podcasts.png) | ![Music space](docs/screenshots/music.png) |
+
+## License
+
+lightTube is licensed under the GNU General Public License, version 3 or later. See [LICENSE](LICENSE).

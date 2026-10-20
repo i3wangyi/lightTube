@@ -3,7 +3,6 @@ name: CI
 on:
   push:
     branches: ["*"]
-    tags: ["v*"]
   pull_request:
     branches: ["*"]
 
@@ -37,17 +36,6 @@ jobs:
       - name: Run checks
         run: make check GO=go
 
-      - name: Build distribution tarball
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: make dist GO=go
-
-      - name: Upload Linux artifact
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: actions/upload-artifact@v4
-        with:
-          name: lighttube-linux
-          path: dist/*.tar.gz
-
   windows-latest:
     runs-on: windows-latest
     steps:
@@ -67,18 +55,6 @@ jobs:
         run: |
           go build ./cmd/lighttube
           go vet ./...
-
-      - name: Package Windows zip
-        if: startsWith(github.ref, 'refs/tags/v')
-        shell: pwsh
-        run: .\scripts\package-windows.ps1
-
-      - name: Upload Windows artifact
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: actions/upload-artifact@v4
-        with:
-          name: lighttube-windows
-          path: dist/*.zip
 
   macos-latest:
     runs-on: macos-latest
