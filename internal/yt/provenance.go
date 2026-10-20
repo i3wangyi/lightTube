@@ -21,6 +21,9 @@ const (
 // A canonical watch URL returned by a Shorts tab or a Shorts search filter is a Short.
 // A vertical video from a normal feed or normal video search is NOT a Short.
 func IsShort(v Video, kind ProvenanceKind) bool {
+	if kind == "" {
+		kind = v.Provenance
+	}
 	switch kind {
 	case ProvenanceShortsTab, ProvenanceShortsSearch, ProvenanceShortsURL:
 		return true

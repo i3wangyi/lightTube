@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,6 +22,58 @@ type PodcastShow struct {
 	ThumbnailURL string `json:"thumbnail_url,omitempty"`
 	Channel      string `json:"channel,omitempty"`
 	Genre        string `json:"genre,omitempty"`
+}
+
+// ParsePodcastPlaylistSearch parses playlist results from YouTube's playlist search filter.
+func ParsePodcastPlaylistSearch(data []byte) ([]Playlist, error) {
+	var payload struct {
+		Entries []map[string]any `json:"entries"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return nil, fmt.Errorf("decoding podcast playlist search: %w", err)
+	}
+	var out []Playlist
+	for _, entry := range payload.Entries {
+		id, title := cleanString(entry["id"]), cleanString(entry["title"])
+		link := cleanString(entry["url"])
+		if link == "" {
+			link = cleanString(entry["webpage_url"])
+		}
+		isPlaylist := strings.Contains(link, "list=") || strings.EqualFold(cleanString(entry["_type"]), "playlist")
+		if !isPlaylist {
+			continue
+		}
+		if !strings.Contains(link, "list=") && id != "" {
+			link = "https://www.youtube.com/playlist?list=" + id
+		}
+		if id == "" || title == "" || !strings.Contains(link, "list=") {
+			continue
+		}
+		out = append(out, Playlist{ID: id, Title: title, URL: link, ThumbnailURL: cleanString(entry["thumbnail"])})
+	}
+	return out, nil
+}
+
+// SearchPodcastPlaylists searches YouTube's playlist-only result filter.
+func (a *Account) SearchPodcastPlaylists(ctx context.Context, query string) ([]Playlist, error) {
+	searchURL := "https://www.youtube.com/results?search_query=" + url.QueryEscape(query+" podcast") + "&sp=EgIQAw%3D%3D"
+	bin := a.BinaryPath
+	if bin == "" {
+		bin = "yt-dlp"
+	}
+	args := []string{"--flat-playlist", "-J", searchURL}
+	if a.SignedIn() {
+		if cookies, err := a.PlaybackCookieFile(); err == nil {
+			args = append([]string{"--cookies", cookies}, args...)
+		}
+	}
+	cmd := exec.CommandContext(ctx, bin, args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("searching podcast playlists: %w (%s)", err, SanitizeErrorOutput(stderr.String()))
+	}
+	return ParsePodcastPlaylistSearch(stdout.Bytes())
 }
 
 // ParsePodcastsFeedJSON parses the yt-dlp flat playlist output for https://www.youtube.com/feed/podcasts.

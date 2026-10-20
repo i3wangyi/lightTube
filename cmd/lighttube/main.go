@@ -29,7 +29,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintf(w, `lightTube — small, fast YouTube client
 
 Usage:
-  lighttube [--external-player] [--debug]
+  lighttube [--external-player] [--debug] [--debug-sequence <steps>]
   lighttube play <url> [--audio]
   lighttube search <query>
   lighttube feed [--account home|subs|later|history]
@@ -90,9 +90,15 @@ func run(args []string) error {
 	var debugVideoMarker bool
 	var debugPlayFirst bool
 	var debugSeekSeconds int
+	var debugSequence string
 	var filtered []string
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
+		if arg == "--debug-sequence" && i+1 < len(args) {
+			debugSequence = args[i+1]
+			i++
+			continue
+		}
 		if arg == "--debug-video-marker" {
 			debugVideoMarker = true
 			continue
@@ -264,6 +270,7 @@ func run(args []string) error {
 			DebugVideoMarker:  debugVideoMarker,
 			DebugPlayFirst:    debugPlayFirst,
 			DebugSeekSeconds:  debugSeekSeconds,
+			DebugSequence:     debugSequence,
 		}
 
 		if renderPNG {

@@ -304,27 +304,106 @@ func (ui *UI) switchSpace(space SpaceID) {
 	if target != nil {
 		ui.searchEditor.SetText(target.Query)
 		ui.lastSearchText = target.Query
-		switch space {
-		case SpaceWatch:
-			ui.loadWatchSpaceContent(target.Chip)
-		case SpaceShorts:
-			ui.loadShortsSpaceContent(target.Chip)
-		case SpacePodcasts:
-			ui.loadPodcastsSpaceContent(target.Chip)
-		case SpaceMusic:
-			ui.loadMusicSpaceContent(target.Chip)
+		needsLoad := target.ContentGeneration != ui.currentGen() || !spaceHasContent(target)
+		if needsLoad {
+			switch space {
+			case SpaceWatch:
+				ui.loadWatchSpaceContent(target.Chip)
+			case SpaceShorts:
+				ui.loadShortsSpaceContent(target.Chip)
+			case SpacePodcasts:
+				ui.loadPodcastsSpaceContent(target.Chip)
+			case SpaceMusic:
+				ui.loadMusicSpaceContent(target.Chip)
+			}
+		} else if space == SpaceWatch {
+			ui.state.SetVideos(target.Videos)
 		}
 	}
 
 	ui.invalidate()
 }
 
+func (ui *UI) clearAccountSpaceState(stop, save bool) {
+	ui.bumpGen()
+	if save {
+		ui.saveCurrentPosition()
+	}
+	if stop && ui.embedPlayer != nil {
+		ui.embedPlayer.Stop()
+	}
+	if stop && ui.player != nil {
+		_ = ui.player.Stop()
+	}
+	ui.playerOwnerID = ""
+	ui.playerMuteKnown = false
+	ui.pendingResumeID = ""
+	ui.pendingResumeSeconds = 0
+	ui.watchPaused = true
+	ui.spaces.ResetContent()
+	ui.searchEditor.SetText("")
+	ui.state.SetVideos(nil)
+}
+
 // pausePlayback pauses video playback without launching or playing anything.
 func (ui *UI) pausePlayback() {
+	ui.saveCurrentPosition()
 	if ui.embedPlayer != nil {
 		ui.embedPlayer.SetPause(true)
 	}
 	ui.watchPaused = true
+}
+
+func (ui *UI) togglePlaybackPause() {
+	if ui.embedPlayer == nil {
+		return
+	}
+	if !ui.watchPaused {
+		ui.saveCurrentPosition()
+	}
+	ui.embedPlayer.TogglePause()
+	ui.watchPaused = !ui.watchPaused
+}
+
+func spaceHasContent(state *SpaceState) bool {
+	if state == nil {
+		return false
+	}
+	return state.ContentLoaded
+}
+
+func (ui *UI) ownsPlayer(space SpaceID, mediaID string) bool {
+	return ui.embedPlayer != nil && ui.playerOwnerSpace == space && mediaID != "" && ui.playerOwnerID == mediaID
+}
+
+func (ui *UI) spaceItemPosition(space SpaceID, itemID string) float64 {
+	if ui.ownsPlayer(space, itemID) {
+		return ui.watchCurrentTime
+	}
+	if pos, ok := ui.getVideoPosition(itemID); ok {
+		return pos.Seconds
+	}
+	return 0
+}
+
+func (ui *UI) saveCurrentPosition() {
+	if ui.embedPlayer == nil || ui.playerOwnerID == "" || ui.store == nil {
+		return
+	}
+	st := ui.embedPlayer.Status()
+	seconds, duration := st.TimePos, st.Duration
+	if seconds <= 0 {
+		seconds = ui.watchCurrentTime
+	}
+	if ui.pendingResumeID == ui.playerOwnerID && ui.pendingResumeSeconds > seconds {
+		seconds = ui.pendingResumeSeconds
+	}
+	if duration <= 0 {
+		duration = ui.watchDuration
+	}
+	if duration > 0 {
+		_ = ui.store.SavePosition(ui.currentAccountID(), ui.playerOwnerID, seconds, duration)
+	}
 }
 
 func (ui *UI) currentGen() int64 {
@@ -341,10 +420,14 @@ func (ui *UI) bumpGen() int64 {
 }
 
 func (ui *UI) currentAccountID() string {
-	if ui.account != nil && ui.account.SignedIn() {
-		return ui.settings.ActiveAccount
+	return ui.settings.ActiveAccount
+}
+
+func (ui *UI) collectionAccountID() string {
+	if ui.settings.ActiveAccount == "" || ui.settings.ActiveAccount == "default" {
+		return ""
 	}
-	return ""
+	return ui.settings.ActiveAccount
 }
 
 // openUtility switches to a utility view (Library, Subscriptions, You).

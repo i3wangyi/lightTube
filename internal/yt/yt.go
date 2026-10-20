@@ -13,17 +13,18 @@ import (
 
 // Video represents a YouTube video item.
 type Video struct {
-	ID           string    `json:"id"`
-	Title        string    `json:"title"`
-	Channel      string    `json:"channel"`
-	ChannelID    string    `json:"channel_id"`
-	Duration     int       `json:"duration"` // in seconds
-	ViewCount    int64     `json:"view_count,omitempty"`
-	UploadDate   string    `json:"upload_date,omitempty"`
-	PublishedAt  time.Time `json:"published_at,omitempty"`
-	URL          string    `json:"url,omitempty"`
-	Description  string    `json:"description,omitempty"`
-	ThumbnailURL string    `json:"thumbnail_url,omitempty"`
+	ID           string         `json:"id"`
+	Title        string         `json:"title"`
+	Channel      string         `json:"channel"`
+	ChannelID    string         `json:"channel_id"`
+	Duration     int            `json:"duration"` // in seconds
+	ViewCount    int64          `json:"view_count,omitempty"`
+	UploadDate   string         `json:"upload_date,omitempty"`
+	PublishedAt  time.Time      `json:"published_at,omitempty"`
+	URL          string         `json:"url,omitempty"`
+	Description  string         `json:"description,omitempty"`
+	ThumbnailURL string         `json:"thumbnail_url,omitempty"`
+	Provenance   ProvenanceKind `json:"provenance,omitempty"`
 }
 
 // WatchURL returns the standard watch URL for the video.

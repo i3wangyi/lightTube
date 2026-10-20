@@ -26,7 +26,7 @@ func (ui *UI) layoutPodcastsSpace(gtx layout.Context) layout.Dimensions {
 	chip := state.Chip
 
 	// Trigger live load if needed
-	if !ui.demo && len(state.Shows) == 0 && !ui.podcastsLoading {
+	if !ui.demo && !state.ContentLoaded && !ui.podcastsLoading {
 		ui.loadPodcastsSpaceContent(chip)
 	}
 
@@ -46,7 +46,12 @@ func (ui *UI) layoutPodcastsSpace(gtx layout.Context) layout.Dimensions {
 	}
 	vidH := vidW * 9 / 16
 
-	isPlaying := ui.embedPlayer != nil && state.ResumeItem != nil
+	// A dock click can load a different owner; compute visibility afterward.
+	if ui.spaces.PodcastsDockPlay.Clicked(gtx) {
+		ui.playPodcastsDock()
+	}
+
+	isPlaying := state.ResumeItem != nil && ui.ownsPlayer(SpacePodcasts, state.ResumeItem.ID)
 	dockGtx := gtx
 	dockGtx.Constraints.Min.X = dockW
 	dockGtx.Constraints.Max.X = dockW
@@ -124,7 +129,59 @@ func (ui *UI) layoutPodcastsShowsSection(gtx layout.Context) layout.Dimensions {
 			if ui.podcastsLoading {
 				return ui.layoutEmptyMessage(gtx, "Loading shows from YouTube…")
 			}
+			if state.PodcastsError != "" {
+				return ui.layoutEmptyMessage(gtx, state.PodcastsError)
+			}
 			return ui.layoutEmptyMessage(gtx, "No podcast shows found. Follow shows on YouTube to see them here.")
+		}),
+		layout.Rigid(ui.layoutPodcastPlaylistResults),
+	)
+}
+
+func (ui *UI) layoutPodcastPlaylistResults(gtx layout.Context) layout.Dimensions {
+	state := ui.spaces.State(SpacePodcasts)
+	if len(state.PodcastPlaylists) == 0 {
+		return layout.Dimensions{}
+	}
+	if len(ui.spaces.PodcastPlaylistClicks) < len(state.PodcastPlaylists) {
+		ui.spaces.PodcastPlaylistClicks = make([]widget.Clickable, len(state.PodcastPlaylists))
+	}
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return ui.layoutSectionHeader(gtx, "Podcast playlists", "YouTube playlist search results.")
+		}),
+		layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			var rows []layout.FlexChild
+			for i := range state.PodcastPlaylists {
+				idx := i
+				rows = append(rows, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					pl := state.PodcastPlaylists[idx]
+					if ui.spaces.PodcastPlaylistClicks[idx].Clicked(gtx) && ui.account != nil {
+						state.SelectedPlaylist = &pl
+						gen := ui.currentGen()
+						go func() {
+							ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+							defer cancel()
+							_, videos, err := ui.account.PlaylistVideos(ctx, pl.URL)
+							ui.sendAction(func() {
+								if gen == ui.currentGen() && err == nil {
+									state.Episodes = videos
+									state.Queue = append([]yt.Video(nil), videos...)
+								}
+							})
+							ui.invalidate()
+						}()
+					}
+					return ui.spaces.PodcastPlaylistClicks[idx].Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						gtx.Constraints.Min.Y = gtx.Dp(44)
+						lbl := ui.label(unit.Sp(14), pl.Title)
+						lbl.Color = ui.colors.Text
+						return layout.Inset{Left: unit.Dp(12), Top: unit.Dp(8), Bottom: unit.Dp(8)}.Layout(gtx, lbl.Layout)
+					})
+				}))
+			}
+			return layout.Flex{Axis: layout.Vertical}.Layout(gtx, rows...)
 		}),
 	)
 }
@@ -451,7 +508,7 @@ func (ui *UI) layoutDemoEpisodeRow(gtx layout.Context, ep DemoEpisode) layout.Di
 					layout.Rigid(layout.Spacer{Width: unit.Dp(16)}.Layout),
 					// Time tail
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						lbl := ui.label(unit.Sp(12), ep.ProgressText)
+						lbl := ui.oneLineLabel(unit.Sp(12), ep.ProgressText)
 						lbl.Color = ui.colors.Text2
 						return lbl.Layout(gtx)
 					}),
@@ -565,6 +622,7 @@ func (ui *UI) layoutLiveEpisodesList(gtx layout.Context, episodes []yt.Video) la
 								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 									lbl := ui.label(unit.Sp(12), posText)
 									lbl.Color = ui.colors.Text2
+									lbl.MaxLines = 1
 									return lbl.Layout(gtx)
 								}),
 							)
@@ -586,15 +644,23 @@ func (ui *UI) selectPodcastEpisode(item yt.Video, episodes []yt.Video) {
 	ui.invalidate()
 }
 
+func (ui *UI) playPodcastsDock() {
+	state := ui.spaces.State(SpacePodcasts)
+	if state.ResumeItem == nil {
+		return
+	}
+	if ui.ownsPlayer(SpacePodcasts, state.ResumeItem.ID) {
+		ui.togglePlaybackPause()
+	} else {
+		ui.selectPodcastEpisode(*state.ResumeItem, state.Queue)
+	}
+	ui.invalidate()
+}
+
 // layoutPodcastsDockSection renders the visible player dock in Podcasts space.
 // Controls go below the video subsurface!
 func (ui *UI) layoutPodcastsDockSection(gtx layout.Context, vidW, vidH int, isPlaying bool) layout.Dimensions {
 	state := ui.spaces.State(SpacePodcasts)
-	if ui.spaces.PodcastsDockPlay.Clicked(gtx) && ui.embedPlayer != nil {
-		ui.embedPlayer.TogglePause()
-		ui.watchPaused = !ui.watchPaused
-		ui.invalidate()
-	}
 
 	var title, sub, tail string
 	var imgFile string
@@ -608,7 +674,7 @@ func (ui *UI) layoutPodcastsDockSection(gtx layout.Context, vidW, vidH int, isPl
 	} else if state.ResumeItem != nil {
 		title = state.ResumeItem.Title
 		sub = state.ResumeItem.Channel + " · Visible player"
-		tail = formatPlaybackTime(ui.watchCurrentTime, float64(state.ResumeItem.Duration))
+		tail = formatPlaybackTime(ui.spaceItemPosition(SpacePodcasts, state.ResumeItem.ID), float64(state.ResumeItem.Duration))
 	} else {
 		title = "No episode playing"
 		sub = "Select an episode to play"
@@ -700,8 +766,8 @@ func (ui *UI) layoutPodcastsDockSection(gtx layout.Context, vidW, vidH int, isPl
 								barH := gtx.Dp(3)
 								paint.FillShape(gtx.Ops, ui.colors.Border, clip.Rect(image.Rect(0, 0, barW, barH)).Op())
 								progW := barW * 23 / 100
-								if state.ResumeItem != nil && state.ResumeItem.Duration > 0 && ui.watchCurrentTime > 0 {
-									progW = int(float64(barW) * (ui.watchCurrentTime / float64(state.ResumeItem.Duration)))
+								if state.ResumeItem != nil && state.ResumeItem.Duration > 0 {
+									progW = int(float64(barW) * (ui.spaceItemPosition(SpacePodcasts, state.ResumeItem.ID) / float64(state.ResumeItem.Duration)))
 								}
 								if progW > barW {
 									progW = barW
@@ -712,7 +778,7 @@ func (ui *UI) layoutPodcastsDockSection(gtx layout.Context, vidW, vidH int, isPl
 							layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
 							// Time text
 							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								lbl := ui.label(unit.Sp(10), tail)
+								lbl := ui.oneLineLabel(unit.Sp(10), tail)
 								lbl.Color = ui.colors.Text2
 								return lbl.Layout(gtx)
 							}),

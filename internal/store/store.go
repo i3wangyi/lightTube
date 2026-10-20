@@ -455,6 +455,48 @@ func (s *Store) saveWatchLaterLocked() error {
 	return atomicWriteJSON(filepath.Join(s.dir, "watchlater.json"), s.watchLater)
 }
 
+// SavedCollections reads user-saved music collections for an account.
+func (s *Store) SavedCollections(accountID string) []yt.Album {
+	path := s.collectionsFile(accountID)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var albums []yt.Album
+	if readJSONFile(path, &albums) != nil {
+		return nil
+	}
+	return albums
+}
+
+// SaveCollection prepends a music collection to the account's saved list.
+func (s *Store) SaveCollection(accountID string, album yt.Album) error {
+	if album.ID == "" && album.Title == "" {
+		return errors.New("empty music collection")
+	}
+	path := s.collectionsFile(accountID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var albums []yt.Album
+	_ = readJSONFile(path, &albums)
+	filtered := make([]yt.Album, 0, len(albums)+1)
+	for _, item := range albums {
+		if album.ID != "" && item.ID == album.ID || album.ID == "" && item.Title == album.Title {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	return atomicWriteJSON(path, append([]yt.Album{album}, filtered...))
+}
+
+func (s *Store) collectionsFile(accountID string) string {
+	s.mu.RLock()
+	dir := s.dir
+	s.mu.RUnlock()
+	if accountID == "" || accountID == "default" {
+		return filepath.Join(dir, "collections.json")
+	}
+	return filepath.Join(dir, "accounts", filepath.Base(accountID), "collections.json")
+}
+
 // History returns playback history (newest first, max 500).
 func (s *Store) History() []yt.Video {
 	s.mu.RLock()

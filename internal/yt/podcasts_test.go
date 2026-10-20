@@ -100,3 +100,14 @@ func TestParsePodcastsFeedJSON(t *testing.T) {
 		t.Errorf("expected 'View full playlist' channel label to be dropped, got %q", sChanged[0].Channel)
 	}
 }
+
+func TestParsePodcastPlaylistSearchKeepsPlaylistIdentity(t *testing.T) {
+	data := []byte(`{"entries":[{"id":"PL_fixture","title":"Fixture show episodes","url":"https://www.youtube.com/playlist?list=PL_fixture"},{"id":"video_fixture1","title":"ordinary video","url":"https://www.youtube.com/watch?v=video_fixture1"}]}`)
+	got, err := ParsePodcastPlaylistSearch(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != "PL_fixture" || got[0].URL != "https://www.youtube.com/playlist?list=PL_fixture" {
+		t.Fatalf("playlist search lost source identity: %+v", got)
+	}
+}

@@ -1,6 +1,7 @@
 package yt
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -142,5 +143,18 @@ func TestShortsSearchURL(t *testing.T) {
 	}
 	if strings.Contains(urlStr, "sp=EgIYAQ%3D%3D") {
 		t.Errorf("URL should not contain under-4-min filter sp=EgIYAQ%%3D%%3D, got %q", urlStr)
+	}
+}
+
+func TestMergedShortsSortsNewestAndKeepsChannelFailures(t *testing.T) {
+	videos, err := mergeShortsResults([]shortsChannelResult{
+		{channelID: "UCfixtureA", videos: []Video{{ID: "older_short", UploadDate: "20250101"}, {ID: "newer_short", UploadDate: "20260101"}}},
+		{channelID: "UCfixtureB", videos: []Video{{ID: "newest_short", UploadDate: "20261001"}}, err: errors.New("fixture channel failure")},
+	})
+	if err == nil || !strings.Contains(err.Error(), "UCfixtureB") {
+		t.Fatalf("channel failure was lost: %v", err)
+	}
+	if len(videos) != 3 || videos[0].ID != "newest_short" || videos[1].ID != "newer_short" || videos[2].ID != "older_short" {
+		t.Fatalf("shorts are not newest first: %+v", videos)
 	}
 }

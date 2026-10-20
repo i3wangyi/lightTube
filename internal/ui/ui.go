@@ -83,6 +83,7 @@ type Options struct {
 	DebugVideoMarker   bool
 	DebugPlayFirst     bool
 	DebugSeekSeconds   int
+	DebugSequence      string
 }
 
 // UI manages the Gio window, layout, and event interactions.
@@ -115,6 +116,7 @@ type UI struct {
 	debugPlayTriggered bool
 	debugPlayFirst     bool
 	debugSeekSeconds   int
+	debugSequence      *debugSequence
 	debugVideoMarker   bool
 	spaceOrigin        image.Point
 	spaceSize          image.Point
@@ -140,6 +142,14 @@ type UI struct {
 	watchVolume           float64
 	watchCurrentTime      float64
 	watchDuration         float64
+	playerOwnerSpace      SpaceID
+	playerOwnerID         string
+	shortsSoundOn         bool
+	playerMuteKnown       bool
+	playerMuted           bool
+	pendingResumeID       string
+	pendingResumeSeconds  float64
+	lastPositionSave      time.Time
 	watchFullscreen       bool
 	watchLastMouseMove    time.Time
 	lastVideoClickTime    time.Time
@@ -404,6 +414,7 @@ func New(opts Options) *UI {
 		debugVideoMarker:     opts.DebugVideoMarker,
 		debugPlayFirst:       opts.DebugPlayFirst,
 		debugSeekSeconds:     opts.DebugSeekSeconds,
+		debugSequence:        newDebugSequence(opts.DebugSequence),
 		watchLastMouseMove:   time.Now(),
 		watchVolume:          100,
 		currentScale:         2,
@@ -656,6 +667,7 @@ func (ui *UI) eventLoop() error {
 		switch e := e.(type) {
 		case *app.ClosingEvent:
 			if ui.embedPlayer != nil {
+				ui.saveCurrentPosition()
 				ui.embedPlayer.Stop()
 				ui.embedPlayer.Close()
 				ui.embedPlayer = nil
@@ -663,6 +675,7 @@ func (ui *UI) eventLoop() error {
 
 		case app.DestroyEvent:
 			if ui.embedPlayer != nil {
+				ui.saveCurrentPosition()
 				ui.embedPlayer.Stop()
 				ui.embedPlayer.Close()
 				ui.embedPlayer = nil
@@ -734,6 +747,11 @@ func (ui *UI) eventLoop() error {
 				if time.Since(ui.lastTimePoll) >= 250*time.Millisecond {
 					ui.lastTimePoll = time.Now()
 					st := ui.embedPlayer.Status()
+					if ui.pendingResumeID != "" && ui.pendingResumeID == ui.playerOwnerID && st.Duration > 0 {
+						ui.embedPlayer.Seek(ui.pendingResumeSeconds, false)
+						ui.pendingResumeID = ""
+						ui.pendingResumeSeconds = 0
+					}
 					if ui.debugSeekSeconds > 0 && st.Duration > 0 && st.TimePos > 0 && !st.Paused {
 						ui.embedPlayer.Seek(float64(ui.debugSeekSeconds), false)
 						if ui.debug {
@@ -747,7 +765,12 @@ func (ui *UI) eventLoop() error {
 					}
 					ui.watchPaused = st.Paused
 					ui.watchMuted = st.Muted
+					ui.playerMuted, ui.playerMuteKnown = st.Muted, true
 					ui.watchVolume = st.Volume
+					if !st.Paused && time.Since(ui.lastPositionSave) >= 10*time.Second {
+						ui.saveCurrentPosition()
+						ui.lastPositionSave = time.Now()
+					}
 					if ui.debug && !ui.hwdecLogged && st.HWDecCurrent != "" && st.HWDecCurrent != "no" {
 						ui.hwdecLogged = true
 						fmt.Fprintf(os.Stderr, "hwdec-current=%s video-codec=%s\n", st.HWDecCurrent, st.VideoCodec)
@@ -775,7 +798,12 @@ func (ui *UI) eventLoop() error {
 
 			ui.drainActions()
 			gtx := app.NewContext(&ops, e)
+			step := ui.advanceDebugSequence(gtx.Now)
 			ui.layout(gtx)
+			ui.logDebugSequenceStep(step)
+			if ui.debugSequence != nil && !ui.debugSequence.done {
+				gtx.Execute(op.InvalidateCmd{At: gtx.Now.Add(100 * time.Millisecond)})
+			}
 
 			// Invalidate for next timer tick when playing
 			if ui.embedPlayer != nil && !ui.watchPaused {
@@ -792,6 +820,9 @@ func (ui *UI) eventLoop() error {
 }
 
 func (ui *UI) onStoreLoaded() {
+	if ui.debugSequence != nil {
+		ui.debugSequence.ready = true
+	}
 	ui.settings = ui.store.Settings()
 	if !ui.cliExternalPlayer {
 		ui.externalPlayer = (ui.settings.Player == store.PlayerExternal)
@@ -945,7 +976,7 @@ func (ui *UI) signInAccount() {
 }
 
 func (ui *UI) signOutAccount() {
-	ui.bumpGen()
+	ui.clearAccountSpaceState(true, true)
 	if ui.account == nil {
 		return
 	}
@@ -959,7 +990,7 @@ func (ui *UI) signOutAccount() {
 }
 
 func (ui *UI) switchAccount(acc store.AccountConfig) {
-	ui.bumpGen()
+	ui.clearAccountSpaceState(true, true)
 	if ui.store == nil {
 		return
 	}
@@ -988,12 +1019,16 @@ func (ui *UI) removeAccount(id string) {
 		return
 	}
 	wasActive := ui.settings.ActiveAccount == id
+	if wasActive {
+		ui.saveCurrentPosition()
+	}
 	if err := ui.store.RemoveAccount(id); err != nil {
 		ui.state.Status = fmt.Sprintf("Failed to remove account: %v", err)
 		return
 	}
 	ui.settings = ui.store.Settings()
 	if wasActive {
+		ui.clearAccountSpaceState(true, false)
 		active := ui.store.ActiveAccount()
 		if ui.account != nil {
 			ui.account.CookieFile = active.CookieFile
@@ -1333,6 +1368,12 @@ func (ui *UI) search(query string) {
 				}
 			}
 			ui.state.SetVideos(matched)
+			if ui.spaces != nil && ui.spaces.ActiveSpace == SpaceWatch {
+				state := ui.spaces.State(SpaceWatch)
+				state.Videos = append([]yt.Video(nil), matched...)
+				state.ContentGeneration = ui.currentGen()
+				state.ContentLoaded = true
+			}
 			ui.state.Status = ""
 		}
 		ui.invalidate()
@@ -1354,6 +1395,12 @@ func (ui *UI) search(query string) {
 				return
 			}
 			ui.state.SetVideos(videos)
+			if ui.spaces != nil && ui.spaces.ActiveSpace == SpaceWatch {
+				state := ui.spaces.State(SpaceWatch)
+				state.Videos = append([]yt.Video(nil), videos...)
+				state.ContentGeneration = ui.currentGen()
+				state.ContentLoaded = true
+			}
 			ui.state.Status = ""
 		})
 		ui.invalidate()
@@ -1380,6 +1427,8 @@ func (ui *UI) searchShorts(query string) {
 				}
 			}
 			state.Shorts = matched
+			state.ContentLoaded = true
+			state.ContentGeneration = ui.currentGen()
 			ui.state.Status = ""
 		}
 		ui.invalidate()
@@ -1416,6 +1465,8 @@ func (ui *UI) searchShorts(query string) {
 			vids, pErr := yt.ParseShortsSearchJSON(out)
 			if pErr == nil {
 				state.Shorts = vids
+				state.ContentLoaded = true
+				state.ContentGeneration = gen
 			}
 			ui.state.Status = ""
 		})
@@ -1455,6 +1506,9 @@ func (ui *UI) searchPodcasts(query string) {
 				}
 			}
 			state.Episodes = matchedEps
+			state.PodcastPlaylists = nil
+			state.ContentLoaded = true
+			state.ContentGeneration = ui.currentGen()
 			ui.state.Status = ""
 		}
 		ui.invalidate()
@@ -1463,20 +1517,52 @@ func (ui *UI) searchPodcasts(query string) {
 
 	gen := ui.currentGen()
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-
-		podcastQuery := query + " podcast"
-		videos, err := ui.ytClient.Search(ctx, podcastQuery)
+		var shows []yt.PodcastShow
+		var episodes []yt.Video
+		var playlists []yt.Playlist
+		var err error
+		if ui.account == nil || !ui.account.SignedIn() {
+			state.PodcastsError = "Sign in to search followed podcast shows."
+			err = errors.New("sign in to search followed podcast shows")
+		} else {
+			shows, err = ui.account.PodcastsFeed(ctx)
+			if err == nil {
+				q := strings.ToLower(query)
+				for _, show := range shows {
+					items, fetchErr := ui.account.ShowEpisodes(ctx, show.URL)
+					if fetchErr == nil {
+						for _, item := range items {
+							if strings.Contains(strings.ToLower(item.Title), q) || strings.Contains(strings.ToLower(item.Channel), q) {
+								episodes = append(episodes, item)
+							}
+						}
+					}
+				}
+				filtered := shows[:0]
+				for _, show := range shows {
+					if strings.Contains(strings.ToLower(show.Title), q) || strings.Contains(strings.ToLower(show.Channel), q) {
+						filtered = append(filtered, show)
+					}
+				}
+				shows = filtered
+				playlists, _ = ui.account.SearchPodcastPlaylists(ctx, query)
+			}
+		}
 		ui.sendAction(func() {
 			if gen != ui.currentGen() {
 				return
 			}
 			if err != nil {
-				ui.state.Status = "Podcasts search error: " + err.Error()
+				ui.state.Status = "Could not search followed podcast shows."
 				return
 			}
-			state.Episodes = videos
+			state.Shows = shows
+			state.Episodes = episodes
+			state.PodcastPlaylists = playlists
+			state.ContentLoaded = true
+			state.ContentGeneration = gen
 			ui.state.Status = ""
 		})
 		ui.invalidate()
@@ -1503,6 +1589,10 @@ func (ui *UI) searchMusic(query string) {
 				}
 			}
 			state.Tracks = matchedTracks
+			state.LastMusicTracks = append([]yt.Video(nil), matchedTracks...)
+			state.LastMusicAlbum = nil
+			state.ContentLoaded = true
+			state.ContentGeneration = ui.currentGen()
 			ui.state.Status = ""
 		}
 		ui.invalidate()
@@ -1528,9 +1618,13 @@ func (ui *UI) searchMusic(query string) {
 			}
 			if album != nil {
 				state.Album = album
+				state.LastMusicAlbum = album
 			}
 			state.Tracks = tracks
+			state.LastMusicTracks = append([]yt.Video(nil), tracks...)
 			state.Queue = tracks
+			state.ContentLoaded = true
+			state.ContentGeneration = gen
 			ui.state.Status = ""
 		})
 		ui.invalidate()
@@ -1539,6 +1633,8 @@ func (ui *UI) searchMusic(query string) {
 
 func (ui *UI) loadShortsSpaceContent(chip int) {
 	state := ui.spaces.State(SpaceShorts)
+	state.ContentLoaded = true
+	state.ContentGeneration = ui.currentGen()
 	if ui.demo && ui.demoData != nil {
 		switch chip {
 		case 0, 2:
@@ -1576,6 +1672,7 @@ func (ui *UI) loadShortsSpaceContent(chip int) {
 	case 0: // Following
 		if ui.account != nil {
 			ui.shortsLoading = true
+			state.ShortsError = ""
 			gen := ui.currentGen()
 			go func() {
 				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -1586,8 +1683,9 @@ func (ui *UI) loadShortsSpaceContent(chip int) {
 					if gen != ui.currentGen() {
 						return
 					}
-					if err == nil {
-						state.Shorts = vids
+					state.Shorts = vids
+					if err != nil {
+						state.ShortsError = err.Error()
 					}
 				})
 				ui.invalidate()
@@ -1611,6 +1709,8 @@ func (ui *UI) loadShortsSpaceContent(chip int) {
 
 func (ui *UI) loadPodcastsSpaceContent(chip int) {
 	state := ui.spaces.State(SpacePodcasts)
+	state.ContentLoaded = true
+	state.ContentGeneration = ui.currentGen()
 	if ui.demo && ui.demoData != nil {
 		var shows []yt.PodcastShow
 		for _, s := range ui.demoData.Shows {
@@ -1636,29 +1736,55 @@ func (ui *UI) loadPodcastsSpaceContent(chip int) {
 		return
 	}
 
-	// Live mode
-	if ui.account != nil {
-		ui.podcastsLoading = true
-		gen := ui.currentGen()
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			defer cancel()
-			shows, err := ui.account.PodcastsFeed(ctx)
-			ui.sendAction(func() {
-				ui.podcastsLoading = false
-				if gen != ui.currentGen() {
-					return
-				}
-				if err == nil {
-					state.Shows = shows
-					if len(shows) > 0 && len(state.Episodes) == 0 {
-						ui.loadPodcastShowEpisodes(shows[0])
-					}
-				}
-			})
-			ui.invalidate()
-		}()
+	state.Shows, state.Episodes, state.Queue = nil, nil, nil
+	if chip == 2 {
+		if ui.store != nil {
+			for _, p := range ui.store.UnfinishedPositions(ui.currentAccountID()) {
+				state.Episodes = append(state.Episodes, yt.Video{ID: p.VideoID, Title: p.VideoID, Duration: int(p.Position.Duration)})
+			}
+			state.Queue = append([]yt.Video(nil), state.Episodes...)
+		}
+		state.ContentGeneration = ui.currentGen()
+		return
 	}
+	if ui.account == nil || !ui.account.SignedIn() {
+		state.PodcastsError = "Sign in to load followed podcast shows."
+		state.ContentGeneration = ui.currentGen()
+		return
+	}
+	ui.podcastsLoading = true
+	gen := ui.currentGen()
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		shows, err := ui.account.PodcastsFeed(ctx)
+		var episodes []yt.Video
+		if err == nil && chip == 1 {
+			for _, show := range shows {
+				items, fetchErr := ui.account.ShowEpisodes(ctx, show.URL)
+				if fetchErr == nil && len(items) > 0 {
+					episodes = append(episodes, items[0])
+				}
+			}
+		} else if err == nil && len(shows) > 0 {
+			episodes, err = ui.account.ShowEpisodes(ctx, shows[0].URL)
+		}
+		ui.sendAction(func() {
+			ui.podcastsLoading = false
+			if gen != ui.currentGen() {
+				return
+			}
+			if err == nil {
+				state.Shows, state.Episodes = shows, episodes
+				state.Queue = append([]yt.Video(nil), episodes...)
+				state.ContentGeneration = gen
+				state.PodcastsError = ""
+			} else {
+				state.PodcastsError = "Could not load podcast shows or episodes."
+			}
+		})
+		ui.invalidate()
+	}()
 }
 
 func (ui *UI) loadPodcastShowEpisodes(show yt.PodcastShow) {
@@ -1691,6 +1817,8 @@ func (ui *UI) loadPodcastShowEpisodes(show yt.PodcastShow) {
 
 func (ui *UI) loadMusicSpaceContent(chip int) {
 	state := ui.spaces.State(SpaceMusic)
+	state.ContentLoaded = true
+	state.ContentGeneration = ui.currentGen()
 	if ui.demo && ui.demoData != nil {
 		state.Album = &yt.Album{
 			Title:  ui.demoData.Album.Title,
@@ -1711,27 +1839,50 @@ func (ui *UI) loadMusicSpaceContent(chip int) {
 		return
 	}
 
-	// Live mode
-	if ui.account != nil {
-		ui.musicLoading = true
-		gen := ui.currentGen()
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			defer cancel()
-			tracks, err := ui.account.LikedMusic(ctx)
-			ui.sendAction(func() {
-				ui.musicLoading = false
-				if gen != ui.currentGen() {
-					return
-				}
-				if err == nil {
-					state.Tracks = tracks
-					state.Queue = tracks
-				}
-			})
-			ui.invalidate()
-		}()
+	state.Tracks, state.Queue, state.Album = nil, nil, nil
+	if chip == 1 {
+		if state.LastMusicAlbum != nil {
+			state.Album = state.LastMusicAlbum
+		}
+		state.Tracks = append([]yt.Video(nil), state.LastMusicTracks...)
+		state.Queue = append([]yt.Video(nil), state.Tracks...)
+		state.ContentGeneration = ui.currentGen()
+		return
 	}
+	if chip == 2 {
+		if ui.store != nil {
+			albums := ui.store.SavedCollections(ui.collectionAccountID())
+			if len(albums) > 0 {
+				state.Album = &albums[0]
+				state.Tracks = append([]yt.Video(nil), albums[0].Tracks...)
+			}
+			state.Queue = append([]yt.Video(nil), state.Tracks...)
+		}
+		state.ContentGeneration = ui.currentGen()
+		return
+	}
+	if ui.account == nil || !ui.account.SignedIn() {
+		state.ContentGeneration = ui.currentGen()
+		return
+	}
+	ui.musicLoading = true
+	gen := ui.currentGen()
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		tracks, err := ui.account.LikedMusic(ctx)
+		ui.sendAction(func() {
+			ui.musicLoading = false
+			if gen != ui.currentGen() {
+				return
+			}
+			if err == nil {
+				state.Tracks, state.Queue = tracks, append([]yt.Video(nil), tracks...)
+				state.ContentGeneration = gen
+			}
+		})
+		ui.invalidate()
+	}()
 }
 
 func (ui *UI) loadMergedFeed() {
@@ -1904,6 +2055,7 @@ func (ui *UI) playSpaceVideo(v yt.Video) {
 	if ui.demo {
 		return
 	}
+	ui.saveCurrentPosition()
 	_ = ui.store.AddHistory(v)
 	ui.state.Status = ""
 	ui.watchVideo = v
@@ -1977,10 +2129,62 @@ func (ui *UI) playSpaceVideo(v yt.Video) {
 	ui.lastTimePoll = time.Now()
 
 	if ui.spaces != nil && ui.spaces.ActiveSpace == SpaceShorts {
-		ui.embedPlayer.ToggleMute()
+		ui.setPlayerMuted(!ui.shortsSoundOn)
 	}
+	if ui.spaces != nil {
+		ui.playerOwnerSpace = ui.spaces.ActiveSpace
+		ui.playerOwnerID = v.ID
+	}
+	ui.applyResumePosition(v)
 
 	ui.invalidate()
+}
+
+func (ui *UI) setPlayerMuted(muted bool) {
+	if ui.embedPlayer == nil {
+		return
+	}
+	if !ui.playerMuteKnown {
+		ui.playerMuted = ui.embedPlayer.Status().Muted
+		ui.playerMuteKnown = true
+	}
+	if ui.playerMuted != muted {
+		ui.embedPlayer.ToggleMute()
+		ui.playerMuted = muted
+	}
+	ui.watchMuted = muted
+	if ui.spaces != nil && ui.spaces.ActiveSpace == SpaceShorts {
+		ui.shortsSoundOn = !muted
+	}
+}
+
+func (ui *UI) togglePlayerMute() {
+	if ui.embedPlayer == nil {
+		return
+	}
+	if !ui.playerMuteKnown {
+		ui.playerMuted = ui.embedPlayer.Status().Muted
+		ui.playerMuteKnown = true
+	}
+	ui.embedPlayer.ToggleMute()
+	ui.playerMuted = !ui.playerMuted
+	ui.watchMuted = ui.playerMuted
+	if ui.spaces != nil && ui.spaces.ActiveSpace == SpaceShorts {
+		ui.shortsSoundOn = !ui.playerMuted
+	}
+}
+
+func (ui *UI) applyResumePosition(v yt.Video) {
+	if ui.store == nil || ui.embedPlayer == nil || v.ID == "" {
+		return
+	}
+	pos, ok := ui.store.Position(ui.currentAccountID(), v.ID)
+	if !ok || !pos.IsUnfinished() {
+		return
+	}
+	ui.pendingResumeID = v.ID
+	ui.pendingResumeSeconds = pos.Seconds
+	ui.embedPlayer.Seek(pos.Seconds, false)
 }
 
 // EmbedPlayerController defines embedded player operations.
@@ -2008,6 +2212,12 @@ func (ui *UI) label(size unit.Sp, txt string) material.LabelStyle {
 		ui.labelHook(txt)
 	}
 	return material.Label(ui.th, size, txt)
+}
+
+func (ui *UI) oneLineLabel(size unit.Sp, txt string) material.LabelStyle {
+	lbl := ui.label(size, txt)
+	lbl.MaxLines = 1
+	return lbl
 }
 
 // drawCoverImage scales an image to cover targetSize, center-crops it, clips to a rounded rectangle with radius,
@@ -2366,17 +2576,13 @@ func (ui *UI) layout(gtx layout.Context) layout.Dimensions {
 				case ActionPasteURL:
 					gtx.Execute(clipboard.ReadCmd{Tag: ui.pasteTag})
 				case ActionWatchTogglePause:
-					if ui.embedPlayer != nil {
-						ui.embedPlayer.TogglePause()
-					}
+					ui.togglePlaybackPause()
 				case ActionWatchSeek:
 					if ui.embedPlayer != nil {
 						ui.embedPlayer.Seek(float64(delta), true)
 					}
 				case ActionWatchToggleMute:
-					if ui.embedPlayer != nil {
-						ui.embedPlayer.ToggleMute()
-					}
+					ui.togglePlayerMute()
 				case ActionWatchToggleFullscreen:
 					ui.toggleFullscreen()
 				case ActionWatchBack:
@@ -5209,6 +5415,7 @@ func (ui *UI) toggleFullscreen() {
 }
 
 func (ui *UI) openWatchPage(v yt.Video) {
+	ui.saveCurrentPosition()
 	ui.dropThumbnails()
 	ui.watchVideo = v
 	if ui.state.CurrentTab != TabWatch {
@@ -5286,13 +5493,18 @@ func (ui *UI) openWatchPage(v yt.Video) {
 	ui.watchLastMouseMove = time.Now()
 	ui.hwdecLogged = false
 	ui.lastTimePoll = time.Now()
+	ui.playerOwnerSpace = SpaceWatch
+	ui.playerOwnerID = v.ID
+	ui.applyResumePosition(v)
 	ui.invalidate()
 }
 
 func (ui *UI) closeWatchPage() {
+	ui.saveCurrentPosition()
 	if ui.embedPlayer != nil {
 		ui.embedPlayer.Stop()
 	}
+	ui.playerOwnerID = ""
 	if ui.watchFullscreen {
 		ui.setFullscreen(false)
 	}
@@ -5569,7 +5781,7 @@ func (ui *UI) layoutVideoArea(gtx layout.Context, w, h int) layout.Dimensions {
 			} else {
 				ui.lastVideoClickTime = now
 				if ui.embedPlayer != nil {
-					ui.embedPlayer.TogglePause()
+					ui.togglePlaybackPause()
 				}
 			}
 		}
@@ -5640,12 +5852,12 @@ func (ui *UI) layoutControlsBar(gtx layout.Context, widthPx int) layout.Dimensio
 
 	if ui.watchPlayPauseClick.Clicked(gtx) {
 		if ui.embedPlayer != nil {
-			ui.embedPlayer.TogglePause()
+			ui.togglePlaybackPause()
 		}
 	}
 	if ui.watchMuteClick.Clicked(gtx) {
 		if ui.embedPlayer != nil {
-			ui.embedPlayer.ToggleMute()
+			ui.togglePlayerMute()
 		}
 	}
 	if ui.watchFullscreenClick.Clicked(gtx) {

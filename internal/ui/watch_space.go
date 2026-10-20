@@ -741,6 +741,9 @@ func (ui *UI) getWatchHero() (yt.Video, store.Position, bool) {
 }
 
 func (ui *UI) loadWatchSpaceContent(chip int) {
+	space := ui.spaces.State(SpaceWatch)
+	space.ContentLoaded = true
+	space.ContentGeneration = ui.currentGen()
 	if ui.demo && ui.demoData != nil {
 		switch chip {
 		case 0: // For you
@@ -805,10 +808,13 @@ func (ui *UI) loadWatchSpaceContent(chip int) {
 			ui.state.SetVideos(vids)
 		}
 	case 3: // Saved
+		local := ui.store.WatchLater()
 		if ui.account != nil && ui.account.SignedIn() {
 			cached, _ := ui.account.Cached(yt.FeedWatchLater)
-			ui.state.SetVideos(cached)
+			ui.state.SetVideos(mergeVideos(cached, local))
 			ui.refreshAccountFeed(yt.FeedWatchLater)
+		} else {
+			ui.state.SetVideos(local)
 		}
 	}
 }

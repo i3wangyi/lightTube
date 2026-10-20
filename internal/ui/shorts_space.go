@@ -5,6 +5,7 @@ import (
 	"image"
 	"image/color"
 
+	"gioui.org/f32"
 	"gioui.org/font"
 	"gioui.org/io/pointer"
 	"gioui.org/layout"
@@ -39,7 +40,10 @@ func (ui *UI) layoutShortsSpace(gtx layout.Context) layout.Dimensions {
 			if chip == 1 {
 				return ui.layoutShortsStatusCard(gtx, "No saved Shorts", "Save a Short to access it here.")
 			}
-			return ui.layoutShortsStatusCard(gtx, "No Shorts available", "Follow channels that produce Shorts or search for Shorts above.")
+			if state.ShortsError != "" {
+				return ui.layoutShortsStatusCard(gtx, "Shorts could not load", "Some followed channels failed. Try again later.")
+			}
+			return ui.layoutShortsStatusCard(gtx, "No Shorts available", "No Shorts were found on followed channels.")
 		}
 	}
 
@@ -80,7 +84,7 @@ func (ui *UI) layoutShortsSpace(gtx layout.Context) layout.Dimensions {
 		ui.spaceOrigin.X+stageRelX+portW,
 		ui.spaceOrigin.Y+stageRelY+portH,
 	)
-	if ui.embedPlayer != nil && state.ResumeItem != nil && chip == 0 {
+	if state.ResumeItem != nil && ui.ownsPlayer(SpaceShorts, state.ResumeItem.ID) {
 		ui.registerVideoBox(stageRect)
 	} else {
 		ui.registerVideoBox(image.Rectangle{})
@@ -168,22 +172,30 @@ func (ui *UI) layoutShortsPortraitWrap(gtx layout.Context, portW, portH int) lay
 	if ui.spaces.ShortsPrevClick.Clicked(gtx) {
 		if shortTotal > 0 {
 			state.ShortIndex = (state.ShortIndex - 1 + shortTotal) % shortTotal
+			ui.selectShort(currentShortByState(state, state.ShortIndex), state.Shorts)
 			ui.invalidate()
 		}
 	}
 	if ui.spaces.ShortsNextClick.Clicked(gtx) {
 		if shortTotal > 0 {
 			state.ShortIndex = (state.ShortIndex + 1) % shortTotal
+			ui.selectShort(currentShortByState(state, state.ShortIndex), state.Shorts)
 			ui.invalidate()
 		}
 	}
 	if ui.spaces.ShortsSaveClick.Clicked(gtx) {
 		if ui.demo {
+			if ui.demoData != nil {
+				ui.demoData.SavedTitles[currentShort.Title] = true
+			}
 			ui.state.Status = "Short saved to this preview session."
 		} else {
 			if currentShort.ID != "" && ui.store != nil {
-				_ = ui.store.AddWatchLater(currentShort)
-				ui.state.Status = fmt.Sprintf("Saved %q to Library", currentShort.Title)
+				if err := ui.store.AddWatchLater(currentShort); err != nil {
+					ui.state.Status = "Could not save Short."
+				} else {
+					ui.state.Status = fmt.Sprintf("Saved %q to Library", currentShort.Title)
+				}
 			}
 		}
 		ui.invalidate()
@@ -243,6 +255,17 @@ func (ui *UI) selectShort(item yt.Video, shorts []yt.Video) {
 	ui.invalidate()
 }
 
+func currentShortByState(state *SpaceState, index int) yt.Video {
+	if state == nil || len(state.Shorts) == 0 {
+		return yt.Video{}
+	}
+	index %= len(state.Shorts)
+	if index < 0 {
+		index += len(state.Shorts)
+	}
+	return state.Shorts[index]
+}
+
 // layoutPortraitCard renders the card inside the 9:16 portrait stage.
 func (ui *UI) layoutPortraitCard(gtx layout.Context, v yt.Video, demoShort *DemoShort, num, total int) layout.Dimensions {
 	w := gtx.Constraints.Max.X
@@ -269,19 +292,17 @@ func (ui *UI) layoutPortraitCard(gtx layout.Context, v yt.Video, demoShort *Demo
 		},
 		func(gtx layout.Context) layout.Dimensions {
 			// Dark gradient overlay for typography readability (scrim)
-			gradH := gtx.Dp(180)
-			if gradH > h/2 {
-				gradH = h / 2
-			}
-			paint.FillShape(gtx.Ops, ui.colors.Overlay, clip.Rect(image.Rect(0, 0, w, gtx.Dp(50))).Op())
-			paint.FillShape(gtx.Ops, ui.colors.Overlay, clip.Rect(image.Rect(0, h-gradH, w, h)).Op())
+			shortsStageScrim(h).Add(gtx.Ops)
+			clipStack := clip.Rect(image.Rect(0, 0, w, h)).Push(gtx.Ops)
+			paint.PaintOp{}.Add(gtx.Ops)
+			clipStack.Pop()
 
 			return layout.Flex{
 				Axis:      layout.Vertical,
 				Spacing:   layout.SpaceBetween,
 				Alignment: layout.Start,
 			}.Layout(gtx,
-				// Top badge: Muted · Captions on
+				// The badge reports the current player mute state.
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					return layout.Inset{Top: unit.Dp(16), Left: unit.Dp(16)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 						rBadge := clip.UniformRRect(image.Rect(0, 0, gtx.Dp(140), gtx.Dp(26)), gtx.Dp(13))
@@ -292,7 +313,11 @@ func (ui *UI) layoutPortraitCard(gtx layout.Context, v yt.Video, demoShort *Demo
 							},
 							func(gtx layout.Context) layout.Dimensions {
 								return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-									lbl := ui.label(unit.Sp(10), "Muted · Captions on")
+									badge := "Sound on"
+									if ui.watchMuted {
+										badge = "Sound off"
+									}
+									lbl := ui.label(unit.Sp(10), badge)
 									lbl.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
 									lbl.Font.Weight = font.Medium
 									return lbl.Layout(gtx)
@@ -354,6 +379,10 @@ func (ui *UI) layoutPortraitCard(gtx layout.Context, v yt.Video, demoShort *Demo
 			)
 		},
 	)
+}
+
+func shortsStageScrim(height int) paint.LinearGradientOp {
+	return paint.LinearGradientOp{Stop1: f32.Pt(0, 0), Stop2: f32.Pt(0, float32(height)), Color1: color.NRGBA{A: 150}, Color2: color.NRGBA{A: 190}}
 }
 
 // layoutShortsAside renders the right-side "More to explore" panel.

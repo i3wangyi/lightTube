@@ -784,6 +784,7 @@ func TestEmbedPlayerVideoBoxPlacement(t *testing.T) {
 	ui.spaces.State(SpaceShorts).Chip = 0
 	ui.spaces.State(SpaceShorts).Shorts = []yt.Video{{ID: "s1", Title: "Test Short 1"}}
 	ui.spaces.State(SpaceShorts).ResumeItem = &ui.spaces.State(SpaceShorts).Shorts[0]
+	ui.playerOwnerSpace, ui.playerOwnerID = SpaceShorts, "s1"
 	frame()
 	if len(recorder.rects) == 0 {
 		t.Fatal("expected SetRect call on Shorts space")
@@ -817,6 +818,7 @@ func TestEmbedPlayerVideoBoxPlacement(t *testing.T) {
 
 	podEp := yt.Video{ID: "ep1", Title: "Podcast Ep 1"}
 	ui.spaces.State(SpacePodcasts).ResumeItem = &podEp
+	ui.playerOwnerSpace, ui.playerOwnerID = SpacePodcasts, podEp.ID
 	frame()
 	podcastsRect := recorder.rects[len(recorder.rects)-1]
 	if podcastsRect.Empty() {
@@ -836,6 +838,7 @@ func TestEmbedPlayerVideoBoxPlacement(t *testing.T) {
 
 	musicTrack := yt.Video{ID: "m1", Title: "Music Track 1"}
 	ui.spaces.State(SpaceMusic).ResumeItem = &musicTrack
+	ui.playerOwnerSpace, ui.playerOwnerID = SpaceMusic, musicTrack.ID
 	frame()
 	musicRect := recorder.rects[len(recorder.rects)-1]
 	if musicRect.Empty() {
@@ -1056,6 +1059,7 @@ func TestVideoMarkerPixelExactPlacement(t *testing.T) {
 							{ID: "s1", Title: "Short One", URL: "https://www.youtube.com/shorts/s1"},
 						}
 						ui.spaces.State(SpaceShorts).ResumeItem = &ui.spaces.State(SpaceShorts).Shorts[0]
+						ui.playerOwnerSpace, ui.playerOwnerID = SpaceShorts, "s1"
 						ui.watchPaused = false
 					},
 					isPlayer: true,
@@ -1069,6 +1073,7 @@ func TestVideoMarkerPixelExactPlacement(t *testing.T) {
 							{ID: "ep1", Title: "Episode One", Channel: "Podcaster", Duration: 1800},
 						}
 						ui.spaces.State(SpacePodcasts).ResumeItem = &ui.spaces.State(SpacePodcasts).Episodes[0]
+						ui.playerOwnerSpace, ui.playerOwnerID = SpacePodcasts, "ep1"
 						ui.watchPaused = false
 					},
 					isPlayer: true,
@@ -1082,6 +1087,7 @@ func TestVideoMarkerPixelExactPlacement(t *testing.T) {
 							{ID: "m1", Title: "Track One", Channel: "Artist", Duration: 240},
 						}
 						ui.spaces.State(SpaceMusic).ResumeItem = &ui.spaces.State(SpaceMusic).Tracks[0]
+						ui.playerOwnerSpace, ui.playerOwnerID = SpaceMusic, "m1"
 						ui.watchPaused = false
 					},
 					isPlayer: true,
@@ -1205,6 +1211,7 @@ func TestVideoMarkerPixelExactPlacement(t *testing.T) {
 	ui.spaces.State(SpaceShorts).Chip = 0
 	ui.spaces.State(SpaceShorts).Shorts = []yt.Video{{ID: "s1", Title: "Short 1"}}
 	ui.spaces.State(SpaceShorts).ResumeItem = &ui.spaces.State(SpaceShorts).Shorts[0]
+	ui.playerOwnerSpace, ui.playerOwnerID = SpaceShorts, "s1"
 	frame()
 	if recorder.rects[len(recorder.rects)-1].Empty() {
 		t.Fatal("expected non-empty rect for active Shorts player")

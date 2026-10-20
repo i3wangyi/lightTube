@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -77,6 +78,7 @@ func ParseShortsTabJSON(data []byte) ([]Video, error) {
 			UploadDate:  uploadDate,
 			URL:         videoURL,
 			Description: desc,
+			Provenance:  ProvenanceShortsTab,
 		})
 	}
 
@@ -134,6 +136,7 @@ func ParseShortsSearchJSON(data []byte) ([]Video, error) {
 			UploadDate:  uploadDate,
 			URL:         videoURL,
 			Description: desc,
+			Provenance:  ProvenanceShortsSearch,
 		})
 	}
 
@@ -240,8 +243,7 @@ func (a *Account) MergedShorts(ctx context.Context, maxChannels int) ([]Video, e
 		channels = channels[:maxChannels]
 	}
 
-	var allShorts []Video
-	seenIDs := make(map[string]bool)
+	results := make([]shortsChannelResult, 0, len(channels))
 
 	for _, ch := range channels {
 		target := ch.URL
@@ -249,16 +251,38 @@ func (a *Account) MergedShorts(ctx context.Context, maxChannels int) ([]Video, e
 			target = ch.ID
 		}
 		vids, err := a.FetchChannelShorts(ctx, target)
-		if err != nil {
-			continue
+		results = append(results, shortsChannelResult{channelID: ch.ID, videos: vids, err: err})
+	}
+	return mergeShortsResults(results)
+}
+
+type shortsChannelResult struct {
+	channelID string
+	videos    []Video
+	err       error
+}
+
+func mergeShortsResults(results []shortsChannelResult) ([]Video, error) {
+	var allShorts []Video
+	var failures []error
+	seenIDs := make(map[string]bool)
+	for _, result := range results {
+		if result.err != nil {
+			failures = append(failures, fmt.Errorf("channel %s: %w", result.channelID, result.err))
 		}
-		for _, v := range vids {
-			if !seenIDs[v.ID] {
-				seenIDs[v.ID] = true
-				allShorts = append(allShorts, v)
+		for _, video := range result.videos {
+			if video.ID != "" && !seenIDs[video.ID] {
+				seenIDs[video.ID] = true
+				allShorts = append(allShorts, video)
 			}
 		}
 	}
-
-	return allShorts, nil
+	sort.SliceStable(allShorts, func(i, j int) bool {
+		a, b := allShorts[i], allShorts[j]
+		if !a.PublishedAt.IsZero() || !b.PublishedAt.IsZero() {
+			return a.PublishedAt.After(b.PublishedAt)
+		}
+		return a.UploadDate > b.UploadDate
+	})
+	return allShorts, errors.Join(failures...)
 }

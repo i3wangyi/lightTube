@@ -119,6 +119,35 @@ func TestStoreWatchLater(t *testing.T) {
 	}
 }
 
+func TestSavedCollectionAndShortProvenanceRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	st, err := NewWithDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	short := yt.Video{ID: "short_test1", Title: "Short", URL: "https://www.youtube.com/watch?v=short_test1", Provenance: yt.ProvenanceShortsTab}
+	if err := st.AddWatchLater(short); err != nil {
+		t.Fatal(err)
+	}
+	album := yt.Album{ID: "album1", Title: "Fixture album", Artist: "Fixture artist", Tracks: []yt.Video{{ID: "track001", Title: "Track"}}}
+	if err := st.SaveCollection("account-two", album); err != nil {
+		t.Fatal(err)
+	}
+	st, err = NewWithDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.WatchLater(); len(got) != 1 || got[0].Provenance != yt.ProvenanceShortsTab {
+		t.Fatalf("provenance was not persisted: %+v", got)
+	}
+	if got := st.SavedCollections("account-two"); len(got) != 1 || got[0].ID != album.ID {
+		t.Fatalf("saved collection was not persisted: %+v", got)
+	}
+	if got := st.SavedCollections("account-one"); len(got) != 0 {
+		t.Fatalf("collection crossed accounts: %+v", got)
+	}
+}
+
 func TestStoreHistoryMax500(t *testing.T) {
 	dir := t.TempDir()
 	s, err := NewWithDir(dir)

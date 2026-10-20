@@ -7,6 +7,21 @@ import (
 	"lighttube/internal/yt"
 )
 
+func mergeVideos(primary, extra []yt.Video) []yt.Video {
+	seen := make(map[string]bool, len(primary)+len(extra))
+	merged := make([]yt.Video, 0, len(primary)+len(extra))
+	for _, list := range [][]yt.Video{primary, extra} {
+		for _, video := range list {
+			if video.ID == "" || seen[video.ID] {
+				continue
+			}
+			seen[video.ID] = true
+			merged = append(merged, video)
+		}
+	}
+	return merged
+}
+
 // SpaceID identifies one of the four intention-specific spaces.
 type SpaceID int
 
@@ -88,28 +103,36 @@ func GetSpaceConfig(id SpaceID) SpaceConfig {
 
 // SpaceState maintains the independent UI state of a single space.
 type SpaceState struct {
-	ID         SpaceID
-	Chip       int         // Active chip index
-	Query      string      // Search query
-	ScrollList layout.List // List maintaining scroll position
-	Selection  int         // Selected item index
-	Queue      []yt.Video  // Queue belonging to this space
-	ResumeItem *yt.Video   // Hero / resume item
-	Videos     []yt.Video  // Cached video items for this space
+	ID                SpaceID
+	Chip              int         // Active chip index
+	Query             string      // Search query
+	ScrollList        layout.List // List maintaining scroll position
+	Selection         int         // Selected item index
+	Queue             []yt.Video  // Queue belonging to this space
+	ResumeItem        *yt.Video   // Hero / resume item
+	Videos            []yt.Video  // Cached video items for this space
+	ContentGeneration int64
+	ContentLoaded     bool
 
 	// Shorts specific state
-	ShortIndex int
-	Shorts     []yt.Video
+	ShortIndex  int
+	Shorts      []yt.Video
+	ShortsError string
 
 	// Podcasts specific state
-	Shows        []yt.PodcastShow
-	SelectedShow *yt.PodcastShow
-	Episodes     []yt.Video
+	Shows            []yt.PodcastShow
+	SelectedShow     *yt.PodcastShow
+	Episodes         []yt.Video
+	PodcastPlaylists []yt.Playlist
+	SelectedPlaylist *yt.Playlist
+	PodcastsError    string
 
 	// Music specific state
-	Album        *yt.Album
-	Tracks       []yt.Video
-	CurrentTrack *yt.Video
+	Album           *yt.Album
+	Tracks          []yt.Video
+	CurrentTrack    *yt.Video
+	LastMusicAlbum  *yt.Album
+	LastMusicTracks []yt.Video
 }
 
 // SpacesManager manages all 4 spaces and their switching.
@@ -129,9 +152,10 @@ type SpacesManager struct {
 	ShortsOpenWatchBtn widget.Clickable
 
 	// Podcasts controls
-	ShowClicks       []widget.Clickable
-	EpisodeClicks    []widget.Clickable
-	PodcastsDockPlay widget.Clickable
+	ShowClicks            []widget.Clickable
+	EpisodeClicks         []widget.Clickable
+	PodcastPlaylistClicks []widget.Clickable
+	PodcastsDockPlay      widget.Clickable
 
 	// Music controls
 	MusicOpenColBtn widget.Clickable
@@ -151,18 +175,25 @@ func NewSpacesManager() *SpacesManager {
 		SpaceClicks: make(map[SpaceID]*widget.Clickable),
 	}
 	for _, id := range []SpaceID{SpaceWatch, SpaceShorts, SpacePodcasts, SpaceMusic} {
-		sm.Spaces[id] = &SpaceState{
-			ID:        id,
-			Chip:      0,
-			Query:     "",
-			Selection: -1,
-			Queue:     nil,
-			Videos:    nil,
-		}
-		sm.Spaces[id].ScrollList.Axis = layout.Vertical
+		sm.Spaces[id] = newSpaceState(id, 0)
 		sm.SpaceClicks[id] = new(widget.Clickable)
 	}
 	return sm
+}
+
+func newSpaceState(id SpaceID, chip int) *SpaceState {
+	st := &SpaceState{ID: id, Chip: chip, Selection: -1}
+	st.ScrollList.Axis = layout.Vertical
+	return st
+}
+
+// ResetContent replaces every space's state with a fresh one, keeping only
+// the chosen chip. Used at account boundaries so no field of the old
+// account survives, including fields added later.
+func (sm *SpacesManager) ResetContent() {
+	for id, old := range sm.Spaces {
+		sm.Spaces[id] = newSpaceState(id, old.Chip)
+	}
 }
 
 // Active returns the SpaceState of the currently active space.

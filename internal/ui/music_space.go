@@ -24,7 +24,7 @@ func (ui *UI) layoutMusicSpace(gtx layout.Context) layout.Dimensions {
 	chip := state.Chip
 
 	// Trigger live load if needed
-	if !ui.demo && len(state.Tracks) == 0 && !ui.musicLoading {
+	if !ui.demo && !state.ContentLoaded && !ui.musicLoading {
 		ui.loadMusicSpaceContent(chip)
 	}
 
@@ -44,7 +44,12 @@ func (ui *UI) layoutMusicSpace(gtx layout.Context) layout.Dimensions {
 	}
 	vidH := vidW * 9 / 16
 
-	isPlaying := ui.embedPlayer != nil && state.ResumeItem != nil
+	// A dock click can load a different owner; compute visibility afterward.
+	if ui.spaces.MusicDockPlay.Clicked(gtx) {
+		ui.playMusicDock()
+	}
+
+	isPlaying := state.ResumeItem != nil && ui.ownsPlayer(SpaceMusic, state.ResumeItem.ID)
 	dockGtx := gtx
 	dockGtx.Constraints.Min.X = dockW
 	dockGtx.Constraints.Max.X = dockW
@@ -140,12 +145,25 @@ func (ui *UI) layoutMusicFeatureSection(gtx layout.Context) layout.Dimensions {
 
 	// Action buttons
 	if ui.spaces.MusicOpenColBtn.Clicked(gtx) {
-		ui.spaces.State(SpaceMusic).Chip = 1
+		state := ui.spaces.State(SpaceMusic)
+		state.Chip = 1
+		ui.loadMusicSpaceContent(1)
 		ui.state.Status = fmt.Sprintf("Opened collection: %s", title)
 		ui.invalidate()
 	}
 	if ui.spaces.MusicSaveColBtn.Clicked(gtx) {
-		ui.state.Status = fmt.Sprintf("Saved collection: %s", title)
+		state := ui.spaces.State(SpaceMusic)
+		album := state.Album
+		if album == nil && len(state.Tracks) > 0 {
+			album = &yt.Album{ID: state.Tracks[0].Description, Title: title, Artist: state.Tracks[0].Channel, Tracks: append([]yt.Video(nil), state.Tracks...)}
+		}
+		if album == nil || ui.store == nil {
+			ui.state.Status = "No collection is available to save."
+		} else if err := ui.store.SaveCollection(ui.collectionAccountID(), *album); err != nil {
+			ui.state.Status = "Could not save collection."
+		} else {
+			ui.state.Status = fmt.Sprintf("Saved collection: %s", album.Title)
+		}
 		ui.invalidate()
 	}
 
@@ -271,7 +289,16 @@ func (ui *UI) layoutMusicTracksSection(gtx layout.Context) layout.Dimensions {
 			if ui.musicLoading {
 				return ui.layoutEmptyMessage(gtx, "Loading music tracks…")
 			}
-			return ui.layoutEmptyMessage(gtx, "No tracks found.")
+			switch state.Chip {
+			case 0:
+				return ui.layoutEmptyMessage(gtx, "Sign in to load your Liked Music playlist.")
+			case 1:
+				return ui.layoutEmptyMessage(gtx, "Search Music to find albums and tracks.")
+			case 2:
+				return ui.layoutEmptyMessage(gtx, "No saved music collections.")
+			default:
+				return ui.layoutEmptyMessage(gtx, "No music tracks found.")
+			}
 		}),
 	)
 }
@@ -526,20 +553,24 @@ func (ui *UI) layoutLiveTrackRow(gtx layout.Context, num, id, title, artist, col
 	)
 }
 
+func (ui *UI) playMusicDock() {
+	state := ui.spaces.State(SpaceMusic)
+	if state.ResumeItem == nil {
+		return
+	}
+	if ui.demo {
+		ui.state.Status = "Playback disabled in demo"
+	} else if ui.ownsPlayer(SpaceMusic, state.ResumeItem.ID) {
+		ui.togglePlaybackPause()
+	} else {
+		ui.selectMusicTrack(*state.ResumeItem, state.Queue)
+	}
+	ui.invalidate()
+}
+
 // layoutMusicDockSection renders the compact player dock pinned at bottom of viewport.
 // Crucial Wayland rule: the video is a subsurface; never draw Gio content over it; controls go BELOW the video!
 func (ui *UI) layoutMusicDockSection(gtx layout.Context, vidW, vidH int, isPlaying bool) layout.Dimensions {
-	if ui.spaces.MusicDockPlay.Clicked(gtx) {
-		if ui.demo {
-			ui.state.Status = "Playback disabled in demo"
-		} else {
-			if ui.embedPlayer != nil {
-				ui.embedPlayer.TogglePause()
-			}
-		}
-		ui.invalidate()
-	}
-
 	state := ui.spaces.State(SpaceMusic)
 
 	var trackTitle, trackSub, trackTime string
@@ -555,7 +586,7 @@ func (ui *UI) layoutMusicDockSection(gtx layout.Context, vidW, vidH int, isPlayi
 		if state.ResumeItem != nil {
 			trackTitle = fmt.Sprintf("%s · %s", state.ResumeItem.Title, state.ResumeItem.Channel)
 			trackSub = "YouTube playback · Visible player"
-			trackTime = formatPlaybackTime(ui.watchCurrentTime, float64(state.ResumeItem.Duration))
+			trackTime = formatPlaybackTime(ui.spaceItemPosition(SpaceMusic, state.ResumeItem.ID), float64(state.ResumeItem.Duration))
 		} else {
 			trackTitle = "No track playing"
 			trackSub = "Select a track to play"
@@ -648,8 +679,8 @@ func (ui *UI) layoutMusicDockSection(gtx layout.Context, vidW, vidH int, isPlayi
 								barW := gtx.Constraints.Max.X
 								barH := gtx.Dp(3)
 								progW := barW * 36 / 100
-								if state.ResumeItem != nil && state.ResumeItem.Duration > 0 && ui.watchCurrentTime > 0 {
-									progW = int(float64(barW) * (ui.watchCurrentTime / float64(state.ResumeItem.Duration)))
+								if state.ResumeItem != nil && state.ResumeItem.Duration > 0 {
+									progW = int(float64(barW) * (ui.spaceItemPosition(SpaceMusic, state.ResumeItem.ID) / float64(state.ResumeItem.Duration)))
 								}
 								if progW > barW {
 									progW = barW
@@ -661,7 +692,7 @@ func (ui *UI) layoutMusicDockSection(gtx layout.Context, vidW, vidH int, isPlayi
 							layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
 							// Time display
 							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								lbl := ui.label(unit.Sp(10), trackTime)
+								lbl := ui.oneLineLabel(unit.Sp(10), trackTime)
 								lbl.Color = ui.colors.Text2
 								return lbl.Layout(gtx)
 							}),
