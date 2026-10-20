@@ -166,3 +166,37 @@ func TestUnfinishedPositions(t *testing.T) {
 		t.Fatalf("expected unfin1, got %s", unfin[0].VideoID)
 	}
 }
+
+func TestMediaPositionRoundTripAndLegacy(t *testing.T) {
+	dir := t.TempDir()
+	st, err := NewWithDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Position{Seconds: 42, Duration: 600, Space: "Podcasts", MediaKind: "episode", Title: "Fixture episode", Show: "Fixture show"}
+	if err := st.SaveMediaPosition("account", "episode", want); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SavePosition("account", "legacy", 12, 120); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := NewWithDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := reopened.Position("account", "episode")
+	if !ok || got.Seconds != want.Seconds || got.Duration != want.Duration || got.Space != want.Space || got.MediaKind != want.MediaKind || got.Title != want.Title || got.Show != want.Show || got.Updated.IsZero() {
+		t.Fatalf("round trip: %+v", got)
+	}
+	legacy, ok := reopened.Position("account", "legacy")
+	if !ok || legacy.Seconds != 12 || legacy.Space != "" || legacy.MediaKind != "" {
+		t.Fatalf("legacy record: %+v", legacy)
+	}
+	if err := reopened.SavePosition("account", "episode", 50, 600); err != nil {
+		t.Fatal(err)
+	}
+	updated, _ := reopened.Position("account", "episode")
+	if updated.Seconds != 50 || updated.Space != want.Space || updated.MediaKind != want.MediaKind || updated.Title != want.Title || updated.Show != want.Show {
+		t.Fatalf("progress update lost metadata: %+v", updated)
+	}
+}

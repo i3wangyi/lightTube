@@ -837,7 +837,7 @@ func (ui *UI) onStoreLoaded() {
 	if ui.state.CurrentTab == TabHome {
 		if ui.account != nil && ui.account.SignedIn() {
 			cached, _ := ui.account.Cached(yt.FeedHome)
-			ui.state.SetVideos(cached)
+			ui.setWatchVideos(cached)
 			ui.refreshAccountFeed(yt.FeedHome)
 			if chs, _ := ui.account.CachedChannels(); len(chs) > 0 {
 				ui.state.AccountChannels = chs
@@ -849,7 +849,7 @@ func (ui *UI) onStoreLoaded() {
 	} else if ui.state.CurrentTab == TabSubscriptions {
 		if ui.account != nil && ui.account.SignedIn() {
 			cached, _ := ui.account.Cached(yt.FeedSubs)
-			ui.state.SetVideos(cached)
+			ui.setWatchVideos(cached)
 			ui.refreshAccountFeed(yt.FeedSubs)
 			if chs, _ := ui.account.CachedChannels(); len(chs) > 0 {
 				ui.state.AccountChannels = chs
@@ -875,63 +875,53 @@ func (ui *UI) refreshAccountFeed(kind yt.FeedKind) {
 	if ui.account == nil || !ui.account.SignedIn() {
 		return
 	}
+	utility, tab := ui.showingUtility, ui.state.CurrentTab
+	kindOfLoad := loadContent
+	if utility {
+		kindOfLoad = loadLibrary
+	}
+	request := ui.beginSpaceRequest(SpaceWatch, kindOfLoad)
 	ui.refreshMu.Lock()
 	if ui.refreshingFeeds == nil {
 		ui.refreshingFeeds = make(map[yt.FeedKind]bool)
 	}
-	if ui.refreshingFeeds[kind] {
-		ui.refreshMu.Unlock()
-		return
-	}
 	ui.refreshingFeeds[kind] = true
 	ui.refreshMu.Unlock()
-
-	gen := ui.currentGen()
+	source := ui.account
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		videos, err := ui.account.Feed(ctx, kind)
+		videos, err := source.Feed(ctx, kind)
 		ui.sendAction(func() {
+			if !ui.requestCurrent(request) {
+				return
+			}
+
 			ui.refreshMu.Lock()
 			delete(ui.refreshingFeeds, kind)
 			ui.refreshMu.Unlock()
 
-			if gen != ui.currentGen() {
-				return
-			}
-
 			if err != nil {
 				cleanErr := yt.SanitizeErrorOutput(err.Error())
 				ui.accountError = cleanErr
-				ui.state.Status = cleanErr
+				ui.setSpaceStatus(request.state, cleanErr)
 				return
 			}
 			ui.accountError = ""
 
-			// If user is currently on the corresponding tab, update the video list
-			switch kind {
-			case yt.FeedHome:
-				if ui.state.CurrentTab == TabHome {
+			if utility {
+				if ui.showingUtility && ui.state.CurrentTab == tab {
 					ui.state.SetVideos(videos)
 					ui.state.Status = ""
 				}
-			case yt.FeedSubs:
-				if ui.state.CurrentTab == TabSubscriptions {
-					ui.state.SetVideos(videos)
-					ui.state.Status = ""
-				}
-			case yt.FeedWatchLater:
-				if ui.state.CurrentTab == TabWatchLater {
-					ui.state.SetVideos(videos)
-					ui.state.Status = ""
-				}
-			case yt.FeedHistory:
-				if ui.state.CurrentTab == TabHistory {
-					ui.state.SetVideos(videos)
-					ui.state.Status = ""
-				}
+				return
 			}
+			if kind == yt.FeedWatchLater {
+				videos = mergeVideos(videos, ui.store.WatchLater())
+			}
+			ui.setWatchVideos(videos)
+			ui.setSpaceStatus(request.state, "")
 		})
 		ui.invalidate()
 	}()
@@ -1001,9 +991,7 @@ func (ui *UI) switchAccount(acc store.AccountConfig) {
 	}
 	ui.settings = ui.store.Settings()
 	if ui.account != nil {
-		ui.account.CookieFile = switched.CookieFile
-		ui.account.CacheDir = switched.CacheDir
-		ui.account.SetBrowser(switched.BrowserSpec)
+		ui.account = yt.NewAccountWithOptions(yt.AccountOptions{CookieFile: switched.CookieFile, CacheDir: switched.CacheDir, Browser: switched.BrowserSpec, BinaryPath: ui.account.BinaryPath})
 		ui.accountBrowserEditor.SetText(switched.BrowserSpec)
 	}
 	ui.state.SavedPlaylists = nil
@@ -1031,9 +1019,7 @@ func (ui *UI) removeAccount(id string) {
 		ui.clearAccountSpaceState(true, false)
 		active := ui.store.ActiveAccount()
 		if ui.account != nil {
-			ui.account.CookieFile = active.CookieFile
-			ui.account.CacheDir = active.CacheDir
-			ui.account.SetBrowser(active.BrowserSpec)
+			ui.account = yt.NewAccountWithOptions(yt.AccountOptions{CookieFile: active.CookieFile, CacheDir: active.CacheDir, Browser: active.BrowserSpec, BinaryPath: ui.account.BinaryPath})
 			ui.accountBrowserEditor.SetText(active.BrowserSpec)
 		}
 		ui.state.SavedPlaylists = nil
@@ -1049,7 +1035,7 @@ func (ui *UI) reloadAllFeeds() {
 		switch ui.state.CurrentTab {
 		case TabHome:
 			cached, _ := ui.account.Cached(yt.FeedHome)
-			ui.state.SetVideos(cached)
+			ui.setWatchVideos(cached)
 			ui.refreshAccountFeed(yt.FeedHome)
 			if chs, _ := ui.account.CachedChannels(); len(chs) > 0 {
 				ui.state.AccountChannels = chs
@@ -1057,7 +1043,7 @@ func (ui *UI) reloadAllFeeds() {
 			ui.refreshAccountChannels()
 		case TabSubscriptions:
 			cached, _ := ui.account.Cached(yt.FeedSubs)
-			ui.state.SetVideos(cached)
+			ui.setWatchVideos(cached)
 			ui.refreshAccountFeed(yt.FeedSubs)
 			if chs, _ := ui.account.CachedChannels(); len(chs) > 0 {
 				ui.state.AccountChannels = chs
@@ -1146,12 +1132,17 @@ func (ui *UI) loadSavedPlaylists() {
 	}
 
 	ui.playlistsLoading = true
+	request := ui.beginSpaceRequest(ui.spaces.ActiveSpace, loadPlaylists)
+	source := ui.account
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		playlists, err := ui.account.Playlists(ctx)
+		playlists, err := source.Playlists(ctx)
 		ui.sendAction(func() {
+			if !ui.requestCurrent(request) {
+				return
+			}
 			ui.playlistsLoading = false
 			ui.playlistsLoaded = true
 			if err != nil {
@@ -1188,6 +1179,8 @@ func (ui *UI) openPlaylist(pl yt.Playlist) {
 		targetURL = "https://www.youtube.com/playlist?list=" + pl.ID
 	}
 
+	request := ui.beginSpaceRequest(ui.spaces.ActiveSpace, loadLibrary)
+	source := ui.account
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -1195,13 +1188,16 @@ func (ui *UI) openPlaylist(pl yt.Playlist) {
 		var title string
 		var videos []yt.Video
 		var err error
-		if ui.account != nil {
-			title, videos, err = ui.account.PlaylistVideos(ctx, targetURL)
+		if source != nil {
+			title, videos, err = source.PlaylistVideos(ctx, targetURL)
 		} else {
 			err = errors.New("no account configured")
 		}
 
 		ui.sendAction(func() {
+			if !ui.requestCurrent(request) || ui.state.CurrentTab != TabPlaylist || ui.state.CurrentPlaylist.ID != pl.ID {
+				return
+			}
 			if err != nil {
 				cleanErr := yt.SanitizeErrorOutput(err.Error())
 				ui.state.Status = cleanErr
@@ -1355,6 +1351,8 @@ func (ui *UI) search(query string) {
 		}
 	}
 
+	request := ui.beginSpaceRequest(SpaceWatch, loadSearch)
+	request.state.Query = query
 	ui.state.CurrentTab = TabSearch
 	ui.state.Status = fmt.Sprintf("Searching %q…", query)
 
@@ -1380,28 +1378,21 @@ func (ui *UI) search(query string) {
 		return
 	}
 
-	gen := ui.currentGen()
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
 		videos, err := ui.ytClient.Search(ctx, query)
 		ui.sendAction(func() {
-			if gen != ui.currentGen() {
+			if !ui.requestCurrent(request) {
 				return
 			}
 			if err != nil {
-				ui.state.Status = "Search error: " + err.Error()
+				ui.setSpaceStatus(request.state, "Search error: "+err.Error())
 				return
 			}
-			ui.state.SetVideos(videos)
-			if ui.spaces != nil && ui.spaces.ActiveSpace == SpaceWatch {
-				state := ui.spaces.State(SpaceWatch)
-				state.Videos = append([]yt.Video(nil), videos...)
-				state.ContentGeneration = ui.currentGen()
-				state.ContentLoaded = true
-			}
-			ui.state.Status = ""
+			ui.setWatchVideos(videos)
+			ui.setSpaceStatus(request.state, "")
 		})
 		ui.invalidate()
 	}()
@@ -1410,6 +1401,8 @@ func (ui *UI) search(query string) {
 func (ui *UI) searchShorts(query string) {
 	ui.state.Status = "Searching Shorts…"
 	state := ui.spaces.State(SpaceShorts)
+	request := ui.beginSpaceRequest(SpaceShorts, loadSearch)
+	state.Query = query
 
 	if ui.demo {
 		if ui.demoData != nil {
@@ -1435,19 +1428,19 @@ func (ui *UI) searchShorts(query string) {
 		return
 	}
 
-	gen := ui.currentGen()
+	source := ui.account
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
 		searchURL := yt.ShortsSearchURL(query)
 		bin := "yt-dlp"
-		if ui.account != nil && ui.account.BinaryPath != "" {
-			bin = ui.account.BinaryPath
+		if source != nil && source.BinaryPath != "" {
+			bin = source.BinaryPath
 		}
 		args := []string{"--flat-playlist", "-J", searchURL}
-		if ui.account != nil && ui.account.SignedIn() {
-			if cookieCopy, err := ui.account.PlaybackCookieFile(); err == nil {
+		if source != nil && source.SignedIn() {
+			if cookieCopy, err := source.PlaybackCookieFile(); err == nil {
 				args = append([]string{"--cookies", cookieCopy}, args...)
 			}
 		}
@@ -1455,20 +1448,20 @@ func (ui *UI) searchShorts(query string) {
 		cmd := exec.CommandContext(ctx, bin, args...)
 		out, err := cmd.Output()
 		ui.sendAction(func() {
-			if gen != ui.currentGen() {
+			if !ui.requestCurrent(request) {
 				return
 			}
 			if err != nil {
-				ui.state.Status = "Shorts search error"
+				ui.setSpaceStatus(request.state, "Shorts search error")
 				return
 			}
 			vids, pErr := yt.ParseShortsSearchJSON(out)
 			if pErr == nil {
 				state.Shorts = vids
 				state.ContentLoaded = true
-				state.ContentGeneration = gen
+				state.ContentGeneration = request.gen
 			}
-			ui.state.Status = ""
+			ui.setSpaceStatus(request.state, "")
 		})
 		ui.invalidate()
 	}()
@@ -1477,6 +1470,8 @@ func (ui *UI) searchShorts(query string) {
 func (ui *UI) searchPodcasts(query string) {
 	ui.state.Status = fmt.Sprintf("Searching Podcasts for %q…", query)
 	state := ui.spaces.State(SpacePodcasts)
+	request := ui.beginSpaceRequest(SpacePodcasts, loadSearch)
+	state.Query = query
 
 	if ui.demo {
 		if ui.demoData != nil {
@@ -1515,7 +1510,7 @@ func (ui *UI) searchPodcasts(query string) {
 		return
 	}
 
-	gen := ui.currentGen()
+	source := ui.account
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -1523,15 +1518,15 @@ func (ui *UI) searchPodcasts(query string) {
 		var episodes []yt.Video
 		var playlists []yt.Playlist
 		var err error
-		if ui.account == nil || !ui.account.SignedIn() {
-			state.PodcastsError = "Sign in to search followed podcast shows."
-			err = errors.New("sign in to search followed podcast shows")
-		} else {
-			shows, err = ui.account.PodcastsFeed(ctx)
+		if source != nil && source.SignedIn() {
+			shows, err = source.PodcastsFeed(ctx)
 			if err == nil {
 				q := strings.ToLower(query)
 				for _, show := range shows {
-					items, fetchErr := ui.account.ShowEpisodes(ctx, show.URL)
+					items, fetchErr := source.ShowEpisodes(ctx, show.URL)
+					for i := range items {
+						items[i].Channel = show.Title
+					}
 					if fetchErr == nil {
 						for _, item := range items {
 							if strings.Contains(strings.ToLower(item.Title), q) || strings.Contains(strings.ToLower(item.Channel), q) {
@@ -1547,23 +1542,30 @@ func (ui *UI) searchPodcasts(query string) {
 					}
 				}
 				shows = filtered
-				playlists, _ = ui.account.SearchPodcastPlaylists(ctx, query)
 			}
 		}
+		if source == nil {
+			source = yt.NewAccount()
+		}
+		var discoveryErr error
+		playlists, discoveryErr = source.SearchPodcastPlaylists(ctx, query)
+		if err == nil {
+			err = discoveryErr
+		}
 		ui.sendAction(func() {
-			if gen != ui.currentGen() {
+			if !ui.requestCurrent(request) {
 				return
 			}
 			if err != nil {
-				ui.state.Status = "Could not search followed podcast shows."
+				ui.setSpaceStatus(request.state, "Could not search podcasts.")
 				return
 			}
 			state.Shows = shows
 			state.Episodes = episodes
 			state.PodcastPlaylists = playlists
 			state.ContentLoaded = true
-			state.ContentGeneration = gen
-			ui.state.Status = ""
+			state.ContentGeneration = request.gen
+			ui.setSpaceStatus(request.state, "")
 		})
 		ui.invalidate()
 	}()
@@ -1572,6 +1574,8 @@ func (ui *UI) searchPodcasts(query string) {
 func (ui *UI) searchMusic(query string) {
 	ui.state.Status = fmt.Sprintf("Searching Music for %q…", query)
 	state := ui.spaces.State(SpaceMusic)
+	request := ui.beginSpaceRequest(SpaceMusic, loadSearch)
+	state.Query = query
 
 	if ui.demo {
 		if ui.demoData != nil {
@@ -1602,18 +1606,19 @@ func (ui *UI) searchMusic(query string) {
 	if ui.account == nil {
 		return
 	}
-	gen := ui.currentGen()
+
+	source := ui.account
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
-		album, tracks, err := ui.account.SearchMusic(ctx, query)
+		album, tracks, err := source.SearchMusic(ctx, query)
 		ui.sendAction(func() {
-			if gen != ui.currentGen() {
+			if !ui.requestCurrent(request) {
 				return
 			}
 			if err != nil {
-				ui.state.Status = "Music search error: " + err.Error()
+				ui.setSpaceStatus(request.state, "Music search error: "+err.Error())
 				return
 			}
 			if album != nil {
@@ -1624,8 +1629,8 @@ func (ui *UI) searchMusic(query string) {
 			state.LastMusicTracks = append([]yt.Video(nil), tracks...)
 			state.Queue = tracks
 			state.ContentLoaded = true
-			state.ContentGeneration = gen
-			ui.state.Status = ""
+			state.ContentGeneration = request.gen
+			ui.setSpaceStatus(request.state, "")
 		})
 		ui.invalidate()
 	}()
@@ -1633,6 +1638,7 @@ func (ui *UI) searchMusic(query string) {
 
 func (ui *UI) loadShortsSpaceContent(chip int) {
 	state := ui.spaces.State(SpaceShorts)
+	request := ui.beginSpaceRequest(SpaceShorts, loadContent)
 	state.ContentLoaded = true
 	state.ContentGeneration = ui.currentGen()
 	if ui.demo && ui.demoData != nil {
@@ -1673,16 +1679,17 @@ func (ui *UI) loadShortsSpaceContent(chip int) {
 		if ui.account != nil {
 			ui.shortsLoading = true
 			state.ShortsError = ""
-			gen := ui.currentGen()
+
+			source := ui.account
 			go func() {
 				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 				defer cancel()
-				vids, err := ui.account.MergedShorts(ctx, 15)
+				vids, err := source.MergedShorts(ctx, 15)
 				ui.sendAction(func() {
-					ui.shortsLoading = false
-					if gen != ui.currentGen() {
+					if !ui.requestCurrent(request) {
 						return
 					}
+					ui.shortsLoading = false
 					state.Shorts = vids
 					if err != nil {
 						state.ShortsError = err.Error()
@@ -1709,6 +1716,7 @@ func (ui *UI) loadShortsSpaceContent(chip int) {
 
 func (ui *UI) loadPodcastsSpaceContent(chip int) {
 	state := ui.spaces.State(SpacePodcasts)
+	request := ui.beginSpaceRequest(SpacePodcasts, loadContent)
 	state.ContentLoaded = true
 	state.ContentGeneration = ui.currentGen()
 	if ui.demo && ui.demoData != nil {
@@ -1740,7 +1748,9 @@ func (ui *UI) loadPodcastsSpaceContent(chip int) {
 	if chip == 2 {
 		if ui.store != nil {
 			for _, p := range ui.store.UnfinishedPositions(ui.currentAccountID()) {
-				state.Episodes = append(state.Episodes, yt.Video{ID: p.VideoID, Title: p.VideoID, Duration: int(p.Position.Duration)})
+				if p.Space == SpacePodcasts.String() && p.MediaKind == "episode" {
+					state.Episodes = append(state.Episodes, yt.Video{ID: p.VideoID, Title: p.Title, Channel: p.Show, Duration: int(p.Duration)})
+				}
 			}
 			state.Queue = append([]yt.Video(nil), state.Episodes...)
 		}
@@ -1753,31 +1763,39 @@ func (ui *UI) loadPodcastsSpaceContent(chip int) {
 		return
 	}
 	ui.podcastsLoading = true
-	gen := ui.currentGen()
+
+	source := ui.account
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		shows, err := ui.account.PodcastsFeed(ctx)
+		shows, err := source.PodcastsFeed(ctx)
 		var episodes []yt.Video
 		if err == nil && chip == 1 {
 			for _, show := range shows {
-				items, fetchErr := ui.account.ShowEpisodes(ctx, show.URL)
+				items, fetchErr := source.ShowEpisodes(ctx, show.URL)
+				for i := range items {
+					items[i].Channel = show.Title
+				}
 				if fetchErr == nil && len(items) > 0 {
 					episodes = append(episodes, items[0])
 				}
 			}
 		} else if err == nil && len(shows) > 0 {
-			episodes, err = ui.account.ShowEpisodes(ctx, shows[0].URL)
+			episodes, err = source.ShowEpisodes(ctx, shows[0].URL)
+			for i := range episodes {
+				episodes[i].Channel = shows[0].Title
+			}
 		}
 		ui.sendAction(func() {
-			ui.podcastsLoading = false
-			if gen != ui.currentGen() {
+			if !ui.requestCurrent(request) {
 				return
 			}
+			ui.podcastsLoading = false
+			state.Shows = shows
 			if err == nil {
-				state.Shows, state.Episodes = shows, episodes
+				state.Episodes = episodes
 				state.Queue = append([]yt.Video(nil), episodes...)
-				state.ContentGeneration = gen
+				state.ContentGeneration = request.gen
 				state.PodcastsError = ""
 			} else {
 				state.PodcastsError = "Could not load podcast shows or episodes."
@@ -1788,7 +1806,12 @@ func (ui *UI) loadPodcastsSpaceContent(chip int) {
 }
 
 func (ui *UI) loadPodcastShowEpisodes(show yt.PodcastShow) {
+	ui.loadPodcastEpisodes(show, false)
+}
+
+func (ui *UI) loadPodcastEpisodes(show yt.PodcastShow, firstOnly bool) {
 	state := ui.spaces.State(SpacePodcasts)
+	request := ui.beginSpaceRequest(SpacePodcasts, loadContent)
 	state.SelectedShow = &show
 	if ui.demo {
 		return
@@ -1797,16 +1820,30 @@ func (ui *UI) loadPodcastShowEpisodes(show yt.PodcastShow) {
 		return
 	}
 
-	gen := ui.currentGen()
+	ui.podcastsLoading = true
+	source := ui.account
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		episodes, err := ui.account.ShowEpisodes(ctx, show.URL)
+		var episodes []yt.Video
+		var err error
+		if firstOnly {
+			episodes, err = source.FirstShowEpisode(ctx, show.URL)
+		} else {
+			episodes, err = source.ShowEpisodes(ctx, show.URL)
+		}
 		ui.sendAction(func() {
-			if gen != ui.currentGen() {
+			if !ui.requestCurrent(request) {
 				return
 			}
+			ui.podcastsLoading = false
+			if err != nil {
+				state.PodcastsError = "Could not load the selected show episodes."
+			}
 			if err == nil {
+				for i := range episodes {
+					episodes[i].Channel = show.Title
+				}
 				state.Episodes = episodes
 				state.Queue = episodes
 			}
@@ -1817,6 +1854,7 @@ func (ui *UI) loadPodcastShowEpisodes(show yt.PodcastShow) {
 
 func (ui *UI) loadMusicSpaceContent(chip int) {
 	state := ui.spaces.State(SpaceMusic)
+	request := ui.beginSpaceRequest(SpaceMusic, loadContent)
 	state.ContentLoaded = true
 	state.ContentGeneration = ui.currentGen()
 	if ui.demo && ui.demoData != nil {
@@ -1866,19 +1904,20 @@ func (ui *UI) loadMusicSpaceContent(chip int) {
 		return
 	}
 	ui.musicLoading = true
-	gen := ui.currentGen()
+
+	source := ui.account
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		tracks, err := ui.account.LikedMusic(ctx)
+		tracks, err := source.LikedMusic(ctx)
 		ui.sendAction(func() {
-			ui.musicLoading = false
-			if gen != ui.currentGen() {
+			if !ui.requestCurrent(request) {
 				return
 			}
+			ui.musicLoading = false
 			if err == nil {
 				state.Tracks, state.Queue = tracks, append([]yt.Video(nil), tracks...)
-				state.ContentGeneration = gen
+				state.ContentGeneration = request.gen
 			}
 		})
 		ui.invalidate()
@@ -1886,10 +1925,11 @@ func (ui *UI) loadMusicSpaceContent(chip int) {
 }
 
 func (ui *UI) loadMergedFeed() {
+	request := ui.beginSpaceRequest(SpaceWatch, loadContent)
 	subs := ui.store.Subscriptions()
 	ui.state.Subscriptions = subs
 	if len(subs) == 0 {
-		ui.state.SetVideos(nil)
+		ui.setWatchVideos(nil)
 		ui.state.Status = "No subscriptions yet. Add channels in Subscriptions tab or import CSV."
 		return
 	}
@@ -1902,21 +1942,20 @@ func (ui *UI) loadMergedFeed() {
 		}
 	}
 
-	gen := ui.currentGen()
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
 		videos, err := ui.ytClient.MergedFeed(ctx, channelIDs)
 		ui.sendAction(func() {
-			if gen != ui.currentGen() {
+			if !ui.requestCurrent(request) {
 				return
 			}
 			if err != nil {
 				ui.state.Status = "Feed error: " + err.Error()
 				return
 			}
-			ui.state.SetVideos(videos)
+			ui.setWatchVideos(videos)
 			ui.state.Status = ""
 			if ui.state.CurrentTab == TabWatch && len(ui.upNextVideos) == 0 {
 				upNext := make([]yt.Video, 0, len(videos))
@@ -6271,6 +6310,7 @@ func (ui *UI) selectChannel(channelID, channelTitle string) {
 		ui.state.ActiveChannelTitle = channelTitle
 	}
 
+	request := ui.beginSpaceRequest(SpaceWatch, loadContent)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -6279,8 +6319,8 @@ func (ui *UI) selectChannel(channelID, channelTitle string) {
 			return
 		}
 		ui.sendAction(func() {
-			if ui.state.ActiveChannelFilter == channelID {
-				ui.state.SetVideos(videos)
+			if ui.requestCurrent(request) {
+				ui.setWatchVideos(videos)
 			}
 		})
 		ui.invalidate()
@@ -6293,11 +6333,16 @@ func (ui *UI) refreshAccountChannels() {
 		return
 	}
 	ui.accountChannelsFetching = true
+	request := ui.beginSpaceRequest(ui.spaces.ActiveSpace, loadChannels)
+	source := ui.account
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		channels, err := ui.account.Channels(ctx)
+		channels, err := source.Channels(ctx)
 		ui.sendAction(func() {
+			if !ui.requestCurrent(request) {
+				return
+			}
 			ui.accountChannelsFetching = false
 			if err == nil && len(channels) > 0 {
 				ui.state.AccountChannels = channels

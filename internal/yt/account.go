@@ -493,6 +493,10 @@ func (a *Account) CachedPlaylists() ([]Playlist, error) {
 
 // PlaylistVideos fetches entries for a playlist URL via yt-dlp.
 func (a *Account) PlaylistVideos(ctx context.Context, playlistURL string) (string, []Video, error) {
+	return a.playlistVideos(ctx, playlistURL, 0)
+}
+
+func (a *Account) playlistVideos(ctx context.Context, playlistURL string, limit int) (string, []Video, error) {
 	if playlistURL == "" {
 		return "", nil, errors.New("empty playlist URL")
 	}
@@ -506,6 +510,10 @@ func (a *Account) PlaylistVideos(ctx context.Context, playlistURL string) (strin
 		"--flat-playlist",
 		"-J",
 		playlistURL,
+	}
+
+	if limit > 0 {
+		args = append([]string{"--playlist-end", strconv.Itoa(limit)}, args...)
 	}
 
 	if a.SignedIn() {

@@ -154,3 +154,36 @@ func TestDockClickResumesBeforeVideoVisibility(t *testing.T) {
 		})
 	}
 }
+
+func TestDebugSequenceChoosesFollowedShow(t *testing.T) {
+	ui := reviewUI(t)
+	ui.embedPlayer = &sequencePlayer{}
+	ui.firstFramePresented = true
+	source, started, release := delayedChipSource(t, "chosen_episode")
+	ui.account = source
+	state := ui.spaces.State(SpacePodcasts)
+	state.ContentLoaded = true
+	state.Shows = []yt.PodcastShow{{ID: "first", Title: "First show", URL: "https://www.youtube.com/playlist?list=first"}, {ID: "second", Title: "Second show", URL: "https://www.youtube.com/playlist?list=second"}}
+	state.Episodes = []yt.Video{{ID: "wrong_episode"}}
+	state.ResumeItem = &state.Episodes[0]
+	ui.debugSequence = newDebugSequence("podcasts:play:show=2")
+	ui.debugSequence.ready = true
+	now := time.Now()
+	if got := ui.advanceDebugSequence(now); got != "" {
+		t.Fatalf("played before chosen show loaded: %s", got)
+	}
+	waitChipStarted(t, ui, started)
+	if state.SelectedShow == nil || state.SelectedShow.ID != "second" {
+		t.Fatal("did not select second followed show")
+	}
+	release()
+	reviewWaitFor(t, ui, func() bool {
+		return !ui.podcastsLoading && len(state.Episodes) == 1 && state.Episodes[0].ID == "chosen_episode"
+	})
+	if got := ui.advanceDebugSequence(now.Add(time.Second)); got != "podcasts:play:show=2" {
+		t.Fatalf("step=%q", got)
+	}
+	if ui.playerOwnerID != "chosen_episode" || state.ResumeItem.Channel != "Second show" {
+		t.Fatalf("wrong episode: %+v", state.ResumeItem)
+	}
+}

@@ -5,6 +5,8 @@ import (
 	"image"
 	"image/color"
 
+	"lighttube/internal/store"
+
 	"gioui.org/font"
 	"gioui.org/io/pointer"
 	"gioui.org/layout"
@@ -304,6 +306,7 @@ func (ui *UI) switchSpace(space SpaceID) {
 	if target != nil {
 		ui.searchEditor.SetText(target.Query)
 		ui.lastSearchText = target.Query
+		ui.state.Status = target.Status
 		needsLoad := target.ContentGeneration != ui.currentGen() || !spaceHasContent(target)
 		if needsLoad {
 			switch space {
@@ -341,6 +344,11 @@ func (ui *UI) clearAccountSpaceState(stop, save bool) {
 	ui.pendingResumeSeconds = 0
 	ui.watchPaused = true
 	ui.spaces.ResetContent()
+	ui.shortsLoading, ui.podcastsLoading, ui.musicLoading = false, false, false
+	ui.playlistsLoading, ui.playlistsLoaded, ui.accountChannelsFetching = false, false, false
+	ui.refreshMu.Lock()
+	clear(ui.refreshingFeeds)
+	ui.refreshMu.Unlock()
 	ui.searchEditor.SetText("")
 	ui.state.SetVideos(nil)
 }
@@ -402,7 +410,19 @@ func (ui *UI) saveCurrentPosition() {
 		duration = ui.watchDuration
 	}
 	if duration > 0 {
-		_ = ui.store.SavePosition(ui.currentAccountID(), ui.playerOwnerID, seconds, duration)
+		kind := "video"
+		switch ui.playerOwnerSpace {
+		case SpacePodcasts:
+			kind = "episode"
+		case SpaceMusic:
+			kind = "track"
+		case SpaceShorts:
+			kind = "short"
+		}
+		_ = ui.store.SaveMediaPosition(ui.currentAccountID(), ui.playerOwnerID, store.Position{
+			Seconds: seconds, Duration: duration, Space: ui.playerOwnerSpace.String(), MediaKind: kind,
+			Title: ui.watchVideo.Title, Show: ui.watchVideo.Channel,
+		})
 	}
 }
 
@@ -443,6 +463,9 @@ func (ui *UI) openUtility(t Tab) {
 // Title, subtitle, status badge (e.g. "Autoplay off"), and "Ambient on/off" badge-button.
 func (ui *UI) layoutPerSpaceHeading(gtx layout.Context) layout.Dimensions {
 	cfg := GetSpaceConfig(ui.spaces.ActiveSpace)
+	if ui.spaces.ActiveSpace == SpaceShorts {
+		cfg.Badge, _ = ui.shortsSoundLabels()
+	}
 
 	if ui.ambientToggleClick.Clicked(gtx) {
 		newVal := !ui.settings.AmbientEnabled()

@@ -12,12 +12,13 @@ import (
 
 // debugSequence advances only from the UI event loop, including while paused.
 type debugSequence struct {
-	steps   []string
-	index   int
-	ready   bool
-	done    bool
-	entered bool
-	started time.Time
+	steps         []string
+	index         int
+	ready         bool
+	done          bool
+	entered       bool
+	showRequested bool
+	started       time.Time
 }
 
 func newDebugSequence(steps string) *debugSequence {
@@ -62,6 +63,15 @@ func (ui *UI) advanceDebugSequence(now time.Time) string {
 		default:
 			return fail("unknown space")
 		}
+		showIndex := -1
+		if base, option, hasOption := strings.Cut(action, ":"); hasOption {
+			value, valid := strings.CutPrefix(option, "show=")
+			n, err := strconv.Atoi(value)
+			if kind != "podcasts" || base != "play" || !valid || err != nil || n < 1 {
+				return fail("expected podcasts:play:show=N (one-based)")
+			}
+			action, showIndex = base, n-1
+		}
 		if action != "play" && action != "show" {
 			return fail("unknown action")
 		}
@@ -74,7 +84,25 @@ func (ui *UI) advanceDebugSequence(now time.Time) string {
 		}
 		if action == "play" {
 			state := ui.spaces.State(space)
-			if state.ResumeItem != nil {
+			if showIndex >= 0 {
+				if now.Sub(seq.started) > 45*time.Second {
+					return fail("chosen show or episodes not loaded within 45 seconds")
+				}
+				if !seq.showRequested {
+					if showIndex >= len(state.Shows) {
+						return ""
+					}
+					state.Episodes = nil
+					ui.loadPodcastEpisodes(state.Shows[showIndex], true)
+					seq.started = now
+					seq.showRequested = true
+					return ""
+				}
+				if ui.podcastsLoading || len(state.Episodes) == 0 {
+					return ""
+				}
+				ui.selectPodcastEpisode(state.Episodes[0], state.Episodes)
+			} else if state.ResumeItem != nil {
 				if space == SpaceMusic {
 					ui.playMusicDock()
 				} else {
@@ -95,6 +123,7 @@ func (ui *UI) advanceDebugSequence(now time.Time) string {
 	seq.index++
 	seq.done = seq.index == len(seq.steps)
 	seq.entered = false
+	seq.showRequested = false
 	seq.started = time.Time{}
 	return step
 }

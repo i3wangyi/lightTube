@@ -1,6 +1,9 @@
 package yt
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -109,5 +112,22 @@ func TestParsePodcastPlaylistSearchKeepsPlaylistIdentity(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].ID != "PL_fixture" || got[0].URL != "https://www.youtube.com/playlist?list=PL_fixture" {
 		t.Fatalf("playlist search lost source identity: %+v", got)
+	}
+}
+
+func TestFirstShowEpisodeBoundsArchiveRequest(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "source")
+	script := `#!/bin/sh
+[ "$1" = --playlist-end ] && [ "$2" = 1 ] || exit 7
+printf '%s' '{"entries":[{"id":"first_episode","title":"First episode"}]}'
+`
+	if err := os.WriteFile(bin, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	account := NewAccountWithOptions(AccountOptions{BinaryPath: bin, CacheDir: dir, CookieFile: filepath.Join(dir, "missing")})
+	episodes, err := account.FirstShowEpisode(context.Background(), "https://www.youtube.com/playlist?list=fixture")
+	if err != nil || len(episodes) != 1 || episodes[0].ID != "first_episode" {
+		t.Fatalf("first episode: %+v %v", episodes, err)
 	}
 }

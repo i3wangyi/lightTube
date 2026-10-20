@@ -3,6 +3,7 @@ package ui
 import (
 	"testing"
 
+	"lighttube/internal/store"
 	"lighttube/internal/yt"
 )
 
@@ -30,10 +31,10 @@ func TestCorrectionMusicChipsUseSeparateSources(t *testing.T) {
 
 func TestCorrectionPodcastChipsUseSeparateSources(t *testing.T) {
 	ui := reviewUI(t)
-	if err := ui.store.SavePosition("", "episode_continue", 120, 600); err != nil {
+	if err := ui.store.SaveMediaPosition("", "episode_continue", store.Position{Seconds: 120, Duration: 600, Space: "Podcasts", MediaKind: "episode"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := ui.store.SavePosition("", "episode_played", 590, 600); err != nil {
+	if err := ui.store.SaveMediaPosition("", "episode_played", store.Position{Seconds: 590, Duration: 600, Space: "Podcasts", MediaKind: "episode"}); err != nil {
 		t.Fatal(err)
 	}
 

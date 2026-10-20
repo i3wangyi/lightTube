@@ -113,6 +113,9 @@ type SpaceState struct {
 	Videos            []yt.Video  // Cached video items for this space
 	ContentGeneration int64
 	ContentLoaded     bool
+	Status            string
+	requests          [loadKinds]uint64
+	contentRevision   uint64
 
 	// Shorts specific state
 	ShortIndex  int
@@ -149,6 +152,7 @@ type SpacesManager struct {
 	ShortsSaveClick    widget.Clickable
 	ShortsRelatedClick widget.Clickable
 	ShortsStageClick   widget.Clickable
+	ShortsSoundClick   widget.Clickable
 	ShortsOpenWatchBtn widget.Clickable
 
 	// Podcasts controls

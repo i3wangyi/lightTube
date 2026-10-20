@@ -9,6 +9,7 @@ import (
 
 	"gioui.org/font"
 	"gioui.org/io/pointer"
+	"gioui.org/io/semantic"
 	"gioui.org/layout"
 	"gioui.org/op"
 	"gioui.org/op/clip"
@@ -159,13 +160,14 @@ func (ui *UI) layoutPodcastPlaylistResults(gtx layout.Context) layout.Dimensions
 					pl := state.PodcastPlaylists[idx]
 					if ui.spaces.PodcastPlaylistClicks[idx].Clicked(gtx) && ui.account != nil {
 						state.SelectedPlaylist = &pl
-						gen := ui.currentGen()
+						request := ui.beginSpaceRequest(SpacePodcasts, loadContent)
+						source := ui.account
 						go func() {
 							ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 							defer cancel()
-							_, videos, err := ui.account.PlaylistVideos(ctx, pl.URL)
+							_, videos, err := source.PlaylistVideos(ctx, pl.URL)
 							ui.sendAction(func() {
-								if gen == ui.currentGen() && err == nil {
+								if ui.requestCurrent(request) && err == nil {
 									state.Episodes = videos
 									state.Queue = append([]yt.Video(nil), videos...)
 								}
@@ -310,24 +312,7 @@ func (ui *UI) layoutLiveShowsGrid(gtx layout.Context, shows []yt.PodcastShow) la
 					click := &ui.spaces.ShowClicks[itemIdx]
 					if click.Clicked(gtx) {
 						if showItem.URL != "" && ui.account != nil {
-							ui.podcastsLoading = true
-							gen := ui.currentGen()
-							go func() {
-								ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-								defer cancel()
-								episodes, err := ui.account.ShowEpisodes(ctx, showItem.URL)
-								ui.sendAction(func() {
-									ui.podcastsLoading = false
-									if gen != ui.currentGen() {
-										return
-									}
-									if err == nil {
-										ui.spaces.State(SpacePodcasts).Episodes = episodes
-										ui.spaces.State(SpacePodcasts).Queue = episodes
-									}
-								})
-								ui.invalidate()
-							}()
+							ui.loadPodcastShowEpisodes(showItem)
 						}
 					}
 					if click.Hovered() {
@@ -720,69 +705,8 @@ func (ui *UI) layoutPodcastsDockSection(gtx layout.Context, vidW, vidH int, isPl
 						return ui.drawCoverImage(gtx, img, image.Pt(vidW, vidH), unit.Dp(8))
 					}),
 					layout.Rigid(layout.Spacer{Height: unit.Dp(10)}.Layout),
-					// 2. Player controls row STRICTLY BELOW the video
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return layout.Flex{
-							Axis:      layout.Horizontal,
-							Alignment: layout.Middle,
-						}.Layout(gtx,
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-										lbl := ui.label(unit.Sp(12), title)
-										lbl.Color = ui.colors.Text
-										lbl.Font.Weight = font.Bold
-										lbl.MaxLines = 1
-										return lbl.Layout(gtx)
-									}),
-									layout.Rigid(layout.Spacer{Height: unit.Dp(2)}.Layout),
-									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-										lbl := ui.label(unit.Sp(10), sub)
-										lbl.Color = ui.colors.Text2
-										lbl.MaxLines = 1
-										return lbl.Layout(gtx)
-									}),
-								)
-							}),
-							layout.Rigid(layout.Spacer{Width: unit.Dp(16)}.Layout),
-							// Play/Pause button
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								if ui.spaces.PodcastsDockPlay.Hovered() {
-									pointer.CursorPointer.Add(gtx.Ops)
-								}
-								btnSize := gtx.Dp(36)
-								gtx.Constraints = layout.Exact(image.Pt(btnSize, btnSize))
-								r := clip.UniformRRect(image.Rect(0, 0, btnSize, btnSize), btnSize/2)
-								paint.FillShape(gtx.Ops, ui.colors.Raised, r.Op(gtx.Ops))
-								drawPlayPauseIcon(gtx, image.Rect(0, 0, btnSize, btnSize), ui.colors.Text, ui.watchPaused || ui.embedPlayer == nil)
-								return ui.spaces.PodcastsDockPlay.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-									return layout.Dimensions{Size: image.Pt(btnSize, btnSize)}
-								})
-							}),
-							layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
-							// Scrub bar
-							layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-								barW := gtx.Constraints.Max.X
-								barH := gtx.Dp(3)
-								paint.FillShape(gtx.Ops, ui.colors.Border, clip.Rect(image.Rect(0, 0, barW, barH)).Op())
-								progW := barW * 23 / 100
-								if state.ResumeItem != nil && state.ResumeItem.Duration > 0 {
-									progW = int(float64(barW) * (ui.spaceItemPosition(SpacePodcasts, state.ResumeItem.ID) / float64(state.ResumeItem.Duration)))
-								}
-								if progW > barW {
-									progW = barW
-								}
-								paint.FillShape(gtx.Ops, ui.colors.Accent, clip.Rect(image.Rect(0, 0, progW, barH)).Op())
-								return layout.Dimensions{Size: image.Pt(barW, barH)}
-							}),
-							layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
-							// Time text
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								lbl := ui.oneLineLabel(unit.Sp(10), tail)
-								lbl.Color = ui.colors.Text2
-								return lbl.Layout(gtx)
-							}),
-						)
+						return ui.layoutPodcastDockControls(gtx, title, sub, tail)
 					}),
 				)
 			})
@@ -816,4 +740,99 @@ func (ui *UI) layoutEmptyMessage(gtx layout.Context, msg string) layout.Dimensio
 		lbl.Color = ui.colors.Text2
 		return lbl.Layout(gtx)
 	})
+}
+
+func (ui *UI) recordPodcastTime(gtx layout.Context, tail string) (op.CallOp, layout.Dimensions) {
+	gtx.Constraints.Min = image.Point{}
+	gtx.Constraints.Max.X = 1 << 20
+	measure := op.Record(gtx.Ops)
+	label := ui.oneLineLabel(unit.Sp(10), tail)
+	label.Color = ui.colors.Text2
+	dims := label.Layout(gtx)
+	measure.Stop()
+	// Record with the measured bounds so the text and its accessible area agree.
+	gtx.Constraints = layout.Exact(dims.Size)
+	record := op.Record(gtx.Ops)
+	label.Layout(gtx)
+	return record.Stop(), dims
+}
+
+func (ui *UI) layoutPodcastTimeline(gtx layout.Context, tail string) layout.Dimensions {
+	timeCall, timeDims := ui.recordPodcastTime(gtx, tail)
+	return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+		// Gio measures rigid children before giving the remaining width to the bar.
+		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+			width, height := gtx.Constraints.Max.X, gtx.Dp(3)
+			bounds := image.Rect(0, 0, width, height)
+			defer clip.Rect(bounds).Push(gtx.Ops).Pop()
+			semantic.LabelOp("Podcast progress").Add(gtx.Ops)
+			paint.FillShape(gtx.Ops, ui.colors.Border, clip.Rect(bounds).Op())
+			played := width * 23 / 100
+			state := ui.spaces.State(SpacePodcasts)
+			if state.ResumeItem != nil && state.ResumeItem.Duration > 0 {
+				played = int(float64(width) * ui.spaceItemPosition(SpacePodcasts, state.ResumeItem.ID) / float64(state.ResumeItem.Duration))
+			}
+			played = max(0, min(width, played))
+			paint.FillShape(gtx.Ops, ui.colors.Accent, clip.Rect(image.Rect(0, 0, played, height)).Op())
+			return layout.Dimensions{Size: image.Pt(width, height)}
+		}),
+		layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			defer clip.Rect{Max: timeDims.Size}.Push(gtx.Ops).Pop()
+			timeCall.Add(gtx.Ops)
+			return timeDims
+		}),
+	)
+}
+
+func (ui *UI) layoutPodcastDockControls(gtx layout.Context, title, sub, tail string) layout.Dimensions {
+	_, timeDims := ui.recordPodcastTime(gtx, tail)
+	narrow := gtx.Constraints.Max.X < gtx.Dp(600)
+	play := func(gtx layout.Context) layout.Dimensions {
+		size := gtx.Dp(44)
+		gtx.Constraints = layout.Exact(image.Pt(size, size))
+		return ui.spaces.PodcastsDockPlay.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			drawPlayPauseIcon(gtx, image.Rect(0, 0, size, size), ui.colors.Text, ui.watchPaused || ui.embedPlayer == nil)
+			return layout.Dimensions{Size: image.Pt(size, size)}
+		})
+	}
+	info := func(gtx layout.Context) layout.Dimensions {
+		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				label := ui.oneLineLabel(unit.Sp(12), title)
+				label.Font.Weight = font.Bold
+				return label.Layout(gtx)
+			}),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				label := ui.oneLineLabel(unit.Sp(10), sub)
+				label.Color = ui.colors.Text2
+				return label.Layout(gtx)
+			}),
+		)
+	}
+	if narrow {
+		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+					layout.Flexed(1, info), layout.Rigid(play),
+				)
+			}),
+			layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return ui.layoutPodcastTimeline(gtx, tail) }),
+		)
+	}
+	// Limit the title before it can consume the bar's minimum width or the time.
+	titleWidth := max(0, gtx.Constraints.Max.X-timeDims.Size.X-gtx.Dp(80+44+12+12+12))
+	titleWidth = min(titleWidth, gtx.Dp(280))
+	return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			gtx.Constraints.Max.X = titleWidth
+			gtx.Constraints.Min.X = 0
+			return info(gtx)
+		}),
+		layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
+		layout.Rigid(play),
+		layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
+		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions { return ui.layoutPodcastTimeline(gtx, tail) }),
+	)
 }

@@ -213,3 +213,9 @@ func (a *Account) ShowEpisodes(ctx context.Context, playlistURL string) ([]Video
 	}
 	return videos, nil
 }
+
+// FirstShowEpisode avoids fetching a show's entire archive for a debug play step.
+func (a *Account) FirstShowEpisode(ctx context.Context, playlistURL string) ([]Video, error) {
+	_, videos, err := a.playlistVideos(ctx, playlistURL, 1)
+	return videos, err
+}

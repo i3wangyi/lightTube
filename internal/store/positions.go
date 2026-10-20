@@ -12,9 +12,13 @@ import (
 
 // Position records playback progress for a video.
 type Position struct {
-	Seconds  float64   `json:"seconds"`
-	Duration float64   `json:"duration"`
-	Updated  time.Time `json:"updated"`
+	Seconds   float64   `json:"seconds"`
+	Duration  float64   `json:"duration"`
+	Updated   time.Time `json:"updated"`
+	Space     string    `json:"space,omitempty"`
+	MediaKind string    `json:"media_kind,omitempty"`
+	Title     string    `json:"title,omitempty"`
+	Show      string    `json:"show,omitempty"`
 }
 
 // Percent returns playback progress as a percentage between 0 and 100.
@@ -91,6 +95,11 @@ func (s *Store) Position(accountID, videoID string) (Position, bool) {
 
 // SavePosition saves or updates a video's position for the specified account.
 func (s *Store) SavePosition(accountID, videoID string, seconds, duration float64) error {
+	return s.SaveMediaPosition(accountID, videoID, Position{Seconds: seconds, Duration: duration})
+}
+
+// SaveMediaPosition stores progress with the source and display metadata.
+func (s *Store) SaveMediaPosition(accountID, videoID string, position Position) error {
 	if videoID == "" {
 		return errors.New("empty video ID")
 	}
@@ -109,11 +118,13 @@ func (s *Store) SavePosition(accountID, videoID string, seconds, duration float6
 		positions = make(map[string]Position)
 	}
 
-	positions[videoID] = Position{
-		Seconds:  seconds,
-		Duration: duration,
-		Updated:  time.Now(),
+	if position.Space == "" && position.MediaKind == "" {
+		previous := positions[videoID]
+		position.Space, position.MediaKind = previous.Space, previous.MediaKind
+		position.Title, position.Show = previous.Title, previous.Show
 	}
+	position.Updated = time.Now()
+	positions[videoID] = position
 
 	return atomicWriteJSON(filePath, positions)
 }

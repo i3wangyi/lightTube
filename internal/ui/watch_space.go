@@ -742,12 +742,13 @@ func (ui *UI) getWatchHero() (yt.Video, store.Position, bool) {
 
 func (ui *UI) loadWatchSpaceContent(chip int) {
 	space := ui.spaces.State(SpaceWatch)
+	ui.beginSpaceRequest(SpaceWatch, loadContent)
 	space.ContentLoaded = true
 	space.ContentGeneration = ui.currentGen()
 	if ui.demo && ui.demoData != nil {
 		switch chip {
 		case 0: // For you
-			ui.state.SetVideos(ui.demoData.Videos)
+			ui.setWatchVideos(ui.demoData.Videos)
 		case 1: // Following
 			var vids []yt.Video
 			for _, v := range ui.demoData.Videos {
@@ -755,7 +756,7 @@ func (ui *UI) loadWatchSpaceContent(chip int) {
 					vids = append(vids, v)
 				}
 			}
-			ui.state.SetVideos(vids)
+			ui.setWatchVideos(vids)
 		case 2: // Continue
 			var vids []yt.Video
 			for _, v := range ui.demoData.Videos {
@@ -763,7 +764,7 @@ func (ui *UI) loadWatchSpaceContent(chip int) {
 					vids = append(vids, v)
 				}
 			}
-			ui.state.SetVideos(vids)
+			ui.setWatchVideos(vids)
 		case 3: // Saved
 			var vids []yt.Video
 			for _, v := range ui.demoData.Videos {
@@ -771,7 +772,7 @@ func (ui *UI) loadWatchSpaceContent(chip int) {
 					vids = append(vids, v)
 				}
 			}
-			ui.state.SetVideos(vids)
+			ui.setWatchVideos(vids)
 		}
 		return
 	}
@@ -781,7 +782,7 @@ func (ui *UI) loadWatchSpaceContent(chip int) {
 	case 0: // For you
 		if ui.account != nil && ui.account.SignedIn() {
 			cached, _ := ui.account.Cached(yt.FeedHome)
-			ui.state.SetVideos(cached)
+			ui.setWatchVideos(cached)
 			ui.refreshAccountFeed(yt.FeedHome)
 		} else {
 			ui.loadMergedFeed()
@@ -789,7 +790,7 @@ func (ui *UI) loadWatchSpaceContent(chip int) {
 	case 1: // Following
 		if ui.account != nil && ui.account.SignedIn() {
 			cached, _ := ui.account.Cached(yt.FeedSubs)
-			ui.state.SetVideos(cached)
+			ui.setWatchVideos(cached)
 			ui.refreshAccountFeed(yt.FeedSubs)
 		} else {
 			ui.loadMergedFeed()
@@ -805,16 +806,16 @@ func (ui *UI) loadWatchSpaceContent(chip int) {
 					Duration: int(p.Position.Duration),
 				})
 			}
-			ui.state.SetVideos(vids)
+			ui.setWatchVideos(vids)
 		}
 	case 3: // Saved
 		local := ui.store.WatchLater()
 		if ui.account != nil && ui.account.SignedIn() {
 			cached, _ := ui.account.Cached(yt.FeedWatchLater)
-			ui.state.SetVideos(mergeVideos(cached, local))
+			ui.setWatchVideos(mergeVideos(cached, local))
 			ui.refreshAccountFeed(yt.FeedWatchLater)
 		} else {
-			ui.state.SetVideos(local)
+			ui.setWatchVideos(local)
 		}
 	}
 }

@@ -98,7 +98,7 @@ available YouTube Music playlist and search endpoints, which can change upstream
 
 - `lighttube [--external-player] [--debug]`:
   Launch the graphical interface. `--external-player` opens video playback in an external mpv window rather than using the embedded player. `--debug` enables verbose logging.
-  `--debug-sequence "music:play,wait:8,podcasts:play,wait:8,music:show,wait:4,music:play,wait:8"` runs native verification through the UI handlers. `play` selects the first loaded item, or uses the dock Play handler when that space has a resume item. `show` switches spaces without starting playback. `wait` uses seconds. Each completed step logs the active space, player owner, dock item, video rectangle, mute, pause, and playback position. This flag does not send desktop input.
+  `--debug-sequence "music:play,wait:8,podcasts:play,wait:8,music:show,wait:4,music:play,wait:8"` runs native verification through the UI handlers. `play` selects the first loaded item, or uses the dock Play handler when that space has a resume item. `show` switches spaces without starting playback. `wait` uses seconds. `podcasts:play:show=2` plays the first episode of the second followed show (the show number starts at 1); this step fetches one episode instead of the full archive. Each completed step logs the active space, player owner, dock item, video rectangle, mute, pause, and playback position. This flag does not send desktop input.
 - `lighttube play <url> [--audio]`:
   Play a video directly from URL. `--audio` plays audio only with format `ba`.
 - `lighttube search <query>`:

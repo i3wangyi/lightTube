@@ -8,11 +8,13 @@ import (
 	"gioui.org/f32"
 	"gioui.org/font"
 	"gioui.org/io/pointer"
+	"gioui.org/io/semantic"
 	"gioui.org/layout"
 	"gioui.org/op/clip"
 	"gioui.org/op/paint"
 	"gioui.org/unit"
 	"gioui.org/widget"
+	"gioui.org/widget/material"
 
 	"lighttube/internal/yt"
 )
@@ -55,8 +57,8 @@ func (ui *UI) layoutShortsSpace(gtx layout.Context) layout.Dimensions {
 	portW := gtx.Dp(320)
 	portH := gtx.Dp(565)
 	padY := gtx.Dp(16)
-	if winH > padY*2 && portH > winH-padY*2 {
-		portH = winH - padY*2
+	if winH > padY*2+gtx.Dp(44) && portH > winH-padY*2-gtx.Dp(44) {
+		portH = winH - padY*2 - gtx.Dp(44)
 		portW = portH * 9 / 16
 	}
 
@@ -99,7 +101,7 @@ func (ui *UI) layoutShortsSpace(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{Axis: layout.Vertical, Alignment: layout.Start}.Layout(gtx,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					gtxWrap := gtx
-					gtxWrap.Constraints = layout.Exact(image.Pt(portW+gtx.Dp(16)+gtx.Dp(44), portH))
+					gtxWrap.Constraints = layout.Exact(image.Pt(portW+gtx.Dp(16)+gtx.Dp(44), portH+gtx.Dp(44)))
 					return ui.layoutShortsPortraitWrap(gtxWrap, portW, portH)
 				}),
 				layout.Rigid(layout.Spacer{Height: unit.Dp(16)}.Layout),
@@ -122,7 +124,7 @@ func (ui *UI) layoutShortsSpace(gtx layout.Context) layout.Dimensions {
 		return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Start}.Layout(gtx,
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				gtxWrap := gtx
-				gtxWrap.Constraints = layout.Exact(image.Pt(portW+gtx.Dp(16)+gtx.Dp(44), portH))
+				gtxWrap.Constraints = layout.Exact(image.Pt(portW+gtx.Dp(16)+gtx.Dp(44), portH+gtx.Dp(44)))
 				return ui.layoutShortsPortraitWrap(gtxWrap, portW, portH)
 			}),
 			layout.Rigid(layout.Spacer{Width: unit.Dp(48)}.Layout),
@@ -211,12 +213,27 @@ func (ui *UI) layoutShortsPortraitWrap(gtx layout.Context, portW, portH int) lay
 		Axis:      layout.Horizontal,
 		Alignment: layout.Middle,
 	}.Layout(gtx,
-		// Portrait stage (320x565 dp or scaled)
+		// Keep the sound action below the subsurface so it stays visible during playback.
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			gtx.Constraints = layout.Exact(image.Pt(portW, portH))
-			return ui.spaces.ShortsStageClick.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				return ui.layoutPortraitCard(gtx, currentShort, demoShort, shortNum, shortTotal)
-			})
+			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					gtx.Constraints = layout.Exact(image.Pt(portW, portH))
+					return ui.spaces.ShortsStageClick.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						return ui.layoutPortraitCard(gtx, currentShort, demoShort, shortNum, shortTotal)
+					})
+				}),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					if ui.spaces.ShortsSoundClick.Clicked(gtx) {
+						ui.togglePlayerMute()
+					}
+					_, action := ui.shortsSoundLabels()
+					gtx.Constraints = layout.Exact(image.Pt(portW, gtx.Dp(44)))
+					return material.ButtonLayout(ui.th, &ui.spaces.ShortsSoundClick).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						semantic.LabelOp(action).Add(gtx.Ops)
+						return ui.oneLineLabel(unit.Sp(12), action).Layout(gtx)
+					})
+				}),
+			)
 		}),
 		layout.Rigid(layout.Spacer{Width: unit.Dp(16)}.Layout),
 		// Vertical action buttons (↑, ↓, Save)
@@ -302,30 +319,6 @@ func (ui *UI) layoutPortraitCard(gtx layout.Context, v yt.Video, demoShort *Demo
 				Spacing:   layout.SpaceBetween,
 				Alignment: layout.Start,
 			}.Layout(gtx,
-				// The badge reports the current player mute state.
-				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					return layout.Inset{Top: unit.Dp(16), Left: unit.Dp(16)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-						rBadge := clip.UniformRRect(image.Rect(0, 0, gtx.Dp(140), gtx.Dp(26)), gtx.Dp(13))
-						return layout.Background{}.Layout(gtx,
-							func(gtx layout.Context) layout.Dimensions {
-								paint.FillShape(gtx.Ops, ui.colors.Overlay, rBadge.Op(gtx.Ops))
-								return layout.Dimensions{Size: image.Pt(gtx.Dp(140), gtx.Dp(26))}
-							},
-							func(gtx layout.Context) layout.Dimensions {
-								return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-									badge := "Sound on"
-									if ui.watchMuted {
-										badge = "Sound off"
-									}
-									lbl := ui.label(unit.Sp(10), badge)
-									lbl.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
-									lbl.Font.Weight = font.Medium
-									return lbl.Layout(gtx)
-								})
-							},
-						)
-					})
-				}),
 				// Center title
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					return layout.Inset{Left: unit.Dp(18), Right: unit.Dp(18)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
@@ -598,6 +591,7 @@ func (ui *UI) layoutRoundIconButton(gtx layout.Context, click *widget.Clickable,
 	gtx.Constraints = layout.Exact(image.Pt(size, size))
 
 	return click.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		semantic.LabelOp(tip).Add(gtx.Ops)
 		r := clip.UniformRRect(image.Rect(0, 0, size, size), size/2)
 		bgCol := ui.colors.Raised
 		if click.Hovered() {
@@ -725,4 +719,15 @@ func (ui *UI) layoutShortsStatusCard(gtx layout.Context, title, body string) lay
 			)
 		})
 	})
+}
+
+func (ui *UI) shortsSoundLabels() (state, action string) {
+	muted := !ui.shortsSoundOn
+	if ui.embedPlayer != nil && ui.playerOwnerSpace == SpaceShorts && ui.playerOwnerID != "" {
+		muted = ui.embedPlayer.Status().Muted
+	}
+	if muted {
+		return "Sound off", "Turn sound on"
+	}
+	return "Sound on", "Turn sound off"
 }
