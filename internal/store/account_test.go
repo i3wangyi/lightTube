@@ -2,8 +2,10 @@ package store_test
 
 import (
 	"path/filepath"
+	"runtime"
 	"testing"
 
+	"lighttube/internal/platform"
 	"lighttube/internal/store"
 	"lighttube/internal/yt"
 )
@@ -66,11 +68,16 @@ func TestAccountFeedCache(t *testing.T) {
 	}
 }
 
+// The account cache sits under the platform cache directory; the platform
+// tests cover where that is on each OS (XDG_CACHE_HOME on Linux).
 func TestDefaultAccountCacheDir(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", "/custom/cache")
 	dir := store.DefaultAccountCacheDir()
-	expected := filepath.Join("/custom/cache", "lighttube", "account")
+	expected := filepath.Join(platform.CacheDir(), "account")
 	if dir != expected {
 		t.Errorf("expected %q, got %q", expected, dir)
+	}
+	if runtime.GOOS == "linux" && dir != "/custom/cache/lighttube/account" {
+		t.Errorf("on Linux the account cache must follow XDG_CACHE_HOME, got %q", dir)
 	}
 }

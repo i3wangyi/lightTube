@@ -36,7 +36,10 @@ type Options struct {
 type Player struct {
 	socketPath string
 	sysfsPath  string
-	appID      string
+	// powerSource overrides power detection; tests set it because only
+	// Linux reads the sysfs directory.
+	powerSource func() Power
+	appID       string
 
 	mu         sync.Mutex
 	currentCmd *exec.Cmd
@@ -63,6 +66,9 @@ func (p *Player) BuildArgs(opts Options) []string {
 		mode = ModeAudio
 	}
 	power := detectPowerFrom(p.sysfsPath)
+	if p.powerSource != nil {
+		power = p.powerSource()
+	}
 	policy := opts.Policy
 	if policy == "" {
 		policy = CodecPolicyOldGPU

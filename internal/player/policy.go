@@ -62,8 +62,12 @@ func PolicyAutoPicks(caps embed.Caps) CodecPolicy {
 // HWDec returns mpv's hwdec value. Where the policy resolves to old-gpu on
 // Linux, use vaapi: that is the measured path on the Broadwell target.
 func HWDec(policy CodecPolicy, caps embed.Caps) string {
+	return hwdecFor(runtime.GOOS, policy, caps)
+}
+
+func hwdecFor(goos string, policy CodecPolicy, caps embed.Caps) string {
 	if policy == CodecPolicyOldGPU || ((policy == CodecPolicyAuto || policy == "") && PolicyAutoPicks(caps) == CodecPolicyOldGPU) {
-		if runtime.GOOS == "linux" {
+		if goos == "linux" {
 			return "vaapi"
 		}
 	}

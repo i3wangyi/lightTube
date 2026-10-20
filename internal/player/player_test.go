@@ -13,11 +13,14 @@ func TestPlayerBuildArgs(t *testing.T) {
 	appID := "test-app-id"
 
 	formatAC := Format(PowerAC, ModeVideo)
+	// The hwdec value depends on the OS; TestHWDecPerOS covers each OS.
+	wantOldGPU := "--hwdec=" + HWDec(CodecPolicyOldGPU, embed.Caps{})
 	formatBattery := Format(PowerBattery, ModeVideo)
 
 	tests := []struct {
 		name       string
 		setupPower func(dir string)
+		battery    bool
 		opts       Options
 		check      func(t *testing.T, args []string)
 	}{
@@ -28,7 +31,7 @@ func TestPlayerBuildArgs(t *testing.T) {
 				Title: "Test Video",
 			},
 			check: func(t *testing.T, args []string) {
-				assertContains(t, args, "--hwdec=vaapi")
+				assertContains(t, args, wantOldGPU)
 				assertContains(t, args, "--vo=gpu")
 				assertContains(t, args, "--force-window=immediate")
 				assertContains(t, args, "--title=Test Video")
@@ -41,7 +44,8 @@ func TestPlayerBuildArgs(t *testing.T) {
 			},
 		},
 		{
-			name: "video battery arguments",
+			name:    "video battery arguments",
+			battery: true,
 			setupPower: func(dir string) {
 				adp := filepath.Join(dir, "ADP1")
 				_ = os.MkdirAll(adp, 0o755)
@@ -114,13 +118,13 @@ func TestPlayerBuildArgs(t *testing.T) {
 			},
 		},
 		{
-			name: "policy old-gpu on linux uses vaapi hwdec",
+			name: "policy old-gpu uses the OS hwdec",
 			opts: Options{
 				URL:    "https://youtube.com/watch?v=123",
 				Policy: CodecPolicyOldGPU,
 			},
 			check: func(t *testing.T, args []string) {
-				assertContains(t, args, "--hwdec=vaapi")
+				assertContains(t, args, wantOldGPU)
 			},
 		},
 	}
@@ -132,6 +136,9 @@ func TestPlayerBuildArgs(t *testing.T) {
 				tt.setupPower(sysfsDir)
 			}
 			player := NewWithOptions(sockPath, sysfsDir, appID)
+			if tt.battery {
+				player.powerSource = func() Power { return PowerBattery }
+			}
 			args := player.BuildArgs(tt.opts)
 			tt.check(t, args)
 		})
@@ -146,4 +153,22 @@ func assertContains(t *testing.T, slice []string, item string) {
 		}
 	}
 	t.Errorf("expected slice to contain %q, but got %v", item, slice)
+}
+
+func TestHWDecPerOS(t *testing.T) {
+	cases := []struct {
+		goos   string
+		policy CodecPolicy
+		want   string
+	}{
+		{"linux", CodecPolicyOldGPU, "vaapi"},
+		{"darwin", CodecPolicyOldGPU, "auto-safe"},
+		{"windows", CodecPolicyOldGPU, "auto-safe"},
+		{"linux", CodecPolicyAny, "auto-safe"},
+	}
+	for _, c := range cases {
+		if got := hwdecFor(c.goos, c.policy, embed.Caps{}); got != c.want {
+			t.Errorf("hwdecFor(%q, %q) = %q, want %q", c.goos, c.policy, got, c.want)
+		}
+	}
 }
