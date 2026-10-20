@@ -1,3 +1,5 @@
+//go:build linux && cgo
+
 #define _GNU_SOURCE
 #include "hwcaps.h"
 

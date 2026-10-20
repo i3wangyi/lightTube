@@ -31,10 +31,17 @@ jobs:
             libxfixes-dev \
             libegl1-mesa-dev \
             libvulkan-dev \
-            libmpv-dev
+            libmpv-dev \
+            libegl-mesa0 \
+            libgl1-mesa-dri
 
       - name: Run checks
-        run: make check GO=go
+        # The runner has no GPU or display: the headless render tests use
+        # Mesa's software rasterizer on the surfaceless EGL platform.
+        env:
+          EGL_PLATFORM: surfaceless
+          LIBGL_ALWAYS_SOFTWARE: "1"
+        run: make check GO=go TAGS=novulkan
 
   windows-latest:
     runs-on: windows-latest
