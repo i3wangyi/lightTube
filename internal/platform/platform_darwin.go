@@ -8,6 +8,12 @@ import (
 	"path/filepath"
 )
 
+// extraPathDirs lists Homebrew's bin directories (Apple silicon, Intel):
+// an app opened from Finder gets only /usr/bin:/bin:/usr/sbin:/sbin.
+func extraPathDirs() []string {
+	return []string{"/opt/homebrew/bin", "/usr/local/bin"}
+}
+
 // OnBattery determines whether the device is running on battery power by parsing pmset.
 func OnBattery() (bool, bool) {
 	out, err := exec.Command("pmset", "-g", "batt").Output()

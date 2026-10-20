@@ -1,6 +1,9 @@
 package platform
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
 
 func TestParsePmsetBatt(t *testing.T) {
 	tests := []struct {
@@ -61,5 +64,24 @@ func TestParsePmsetBatt(t *testing.T) {
 				t.Errorf("parsePmsetBatt() = (%v, %v); want (%v, %v)", gotBat, gotKnown, tt.wantBat, tt.wantKnown)
 			}
 		})
+	}
+}
+
+func TestExtendedPath(t *testing.T) {
+	sep := string(os.PathListSeparator)
+	cases := []struct {
+		cur   string
+		extra []string
+		want  string
+	}{
+		{"/usr/bin" + sep + "/bin", []string{"/opt/homebrew/bin", "/usr/local/bin"}, "/usr/bin" + sep + "/bin" + sep + "/opt/homebrew/bin" + sep + "/usr/local/bin"},
+		{"/opt/homebrew/bin" + sep + "/usr/bin", []string{"/opt/homebrew/bin"}, "/opt/homebrew/bin" + sep + "/usr/bin"},
+		{"", []string{"/opt/homebrew/bin"}, "/opt/homebrew/bin"},
+		{"/usr/bin", nil, "/usr/bin"},
+	}
+	for _, c := range cases {
+		if got := extendedPath(c.cur, c.extra); got != c.want {
+			t.Errorf("extendedPath(%q, %v) = %q, want %q", c.cur, c.extra, got, c.want)
+		}
 	}
 }

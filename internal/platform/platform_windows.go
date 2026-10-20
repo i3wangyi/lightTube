@@ -24,6 +24,9 @@ type systemPowerStatus struct {
 }
 
 // OnBattery determines whether the device is running on battery power via GetSystemPowerStatus.
+// extraPathDirs is empty: desktop launchers here inherit the session PATH.
+func extraPathDirs() []string { return nil }
+
 func OnBattery() (bool, bool) {
 	var sps systemPowerStatus
 	r1, _, _ := procGetSystemPowerStatus.Call(uintptr(unsafe.Pointer(&sps)))

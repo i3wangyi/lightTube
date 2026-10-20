@@ -44,7 +44,7 @@ Download and unzip the macOS arm64 app archive from [Releases](https://github.co
 brew install mpv yt-dlp
 ```
 
-The app is unsigned. On first open, Control-click `lightTube.app`, select **Open**, then confirm **Open** in the dialog. macOS can block a direct double-click because the app is unsigned. Playback opens in external mpv.
+The app is unsigned. On first open, Control-click `lightTube.app`, select **Open**, then confirm **Open** in the dialog. macOS can block a direct double-click because the app is unsigned. Playback opens in external mpv. The app looks for `mpv` and `yt-dlp` in `PATH` and in Homebrew's `/opt/homebrew/bin` and `/usr/local/bin`, because an app opened from Finder does not get the shell `PATH`.
 
 ### Windows zip
 

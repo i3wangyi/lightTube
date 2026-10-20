@@ -14,6 +14,7 @@ import (
 
 	idemo "lighttube/internal/demo"
 	"lighttube/internal/embed"
+	"lighttube/internal/platform"
 	"lighttube/internal/player"
 	"lighttube/internal/store"
 	"lighttube/internal/thumbs"
@@ -59,6 +60,7 @@ func main() {
 }
 
 func run(args []string) error {
+	platform.ExtendPath()
 	// Keep the existing soft limit unless the user supplied a GC policy.
 	_, hasLimit := os.LookupEnv("GOMEMLIMIT")
 	_, hasGC := os.LookupEnv("GOGC")

@@ -12,6 +12,9 @@ const defaultSysfsPowerSupply = "/sys/class/power_supply"
 
 // OnBattery determines whether the device is running on battery power.
 // It reports known=true when power supplies were found and read successfully.
+// extraPathDirs is empty: desktop launchers here inherit the session PATH.
+func extraPathDirs() []string { return nil }
+
 func OnBattery() (onBattery bool, known bool) {
 	return OnBatteryFrom(defaultSysfsPowerSupply)
 }
