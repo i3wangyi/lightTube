@@ -67,6 +67,7 @@ dist: build
 	cp contrib/lighttube.svg $(DISTDIR)/contrib/
 	cp contrib/hyprland.lua $(DISTDIR)/contrib/
 	cp README.md $(DISTDIR)/
+	cp LICENSE $(DISTDIR)/
 	cp scripts/install.sh $(DISTDIR)/install.sh
 	chmod +x $(DISTDIR)/install.sh
 	tar -czf $(TARBALL) -C dist $(DISTNAME)

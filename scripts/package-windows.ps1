@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Package lightTube for Windows as a zip archive containing lighttube.exe, README.md, and MPV_README.txt.
 $ErrorActionPreference = "Stop"
 
@@ -23,6 +24,7 @@ $env:CGO_ENABLED = "0"
 go build -trimpath -ldflags="-s -w -X main.version=$version" -o (Join-Path $stageDir "lighttube.exe") ./cmd/lighttube
 
 Copy-Item "README.md" -Destination $stageDir
+Copy-Item "LICENSE" -Destination $stageDir
 
 $mpvNote = @"
 lightTube for Windows

@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+pkgname=lighttube
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Lightweight YouTube desktop client'
+arch=('x86_64')
+url='https://github.com/i3wangyi/lightTube'
+license=('GPL-3.0-or-later')
+depends=('mpv' 'yt-dlp' 'wayland' 'libx11' 'libxkbcommon' 'libxcursor' 'libxfixes' 'mesa' 'fontconfig')
+makedepends=('go')
+source=("https://github.com/i3wangyi/lightTube/archive/refs/tags/v${pkgver}.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "$srcdir/lightTube-${pkgver}"
+  make build GO='go' VERSION="$pkgver" TAGS=novulkan
+}
+
+package() {
+  cd "$srcdir/lightTube-${pkgver}"
+  install -Dm755 lighttube "$pkgdir/usr/bin/lighttube"
+  install -Dm644 contrib/lighttube.desktop "$pkgdir/usr/share/applications/lighttube.desktop"
+  install -Dm644 contrib/lighttube.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/lighttube.svg"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

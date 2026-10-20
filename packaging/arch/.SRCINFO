@@ -1,0 +1,21 @@
+pkgbase = lighttube
+	pkgdesc = Lightweight YouTube desktop client
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://github.com/i3wangyi/lightTube
+	arch = x86_64
+	license = GPL-3.0-or-later
+	makedepends = go
+	depends = mpv
+	depends = yt-dlp
+	depends = wayland
+	depends = libx11
+	depends = libxkbcommon
+	depends = libxcursor
+	depends = libxfixes
+	depends = mesa
+	depends = fontconfig
+	source = https://github.com/i3wangyi/lightTube/archive/refs/tags/v0.1.0.tar.gz
+	sha256sums = SKIP
+
+pkgname = lighttube
