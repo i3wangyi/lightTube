@@ -17,6 +17,7 @@ import (
 	"gioui.org/widget"
 
 	"lighttube/internal/store"
+	"lighttube/internal/thumbs"
 	"lighttube/internal/yt"
 )
 
@@ -131,9 +132,53 @@ func (ui *UI) layoutWatchSpace(gtx layout.Context) layout.Dimensions {
 		}
 	}
 	items = append(items, layout.Spacer{Height: unit.Dp(32)}.Layout)
-	return ui.spaces.Active().ScrollList.Layout(gtx, len(items), func(gtx layout.Context, index int) layout.Dimensions {
+	firstGrid := 1
+	if showHero && hasHero {
+		firstGrid++
+	} else {
+		hero = yt.Video{}
+	}
+	return ui.layoutWatchItems(gtx, items, gridVideos, firstGrid,
+		watchGridColumns(gtx, gtx.Constraints.Max.X-2*gtx.Dp(padX)), hero)
+}
+
+func (ui *UI) layoutWatchItems(gtx layout.Context, items []layout.Widget, videos []yt.Video, firstGrid, cols int, hero yt.Video) layout.Dimensions {
+	list := &ui.spaces.Active().ScrollList
+	// Gio measures offscreen items too; request only the final visible range.
+	ui.deferWatchThumbnails = true
+	dims := list.Layout(gtx, len(items), func(gtx layout.Context, index int) layout.Dimensions {
 		return items[index](gtx)
 	})
+	ui.deferWatchThumbnails = false
+	if !ui.demo {
+		budget := thumbs.MaxThumbnailsInHalfBudget
+		if hero.ID != "" && list.Position.First == 0 && list.Position.Count > 0 {
+			ui.requestThumbnail(hero.ID)
+			budget--
+		}
+		start := min(len(videos), max(0, list.Position.First-firstGrid)*cols)
+		end := min(len(videos), max(0, list.Position.First+list.Position.Count-firstGrid)*cols)
+		end = min(end, start+budget)
+		for _, v := range videos[start:end] {
+			ui.requestThumbnail(v.ID)
+		}
+	}
+	return dims
+}
+
+func (ui *UI) layoutResponsiveGrid(gtx layout.Context, videos []yt.Video) layout.Dimensions {
+	cols := watchGridColumns(gtx, gtx.Constraints.Max.X)
+	for len(ui.cardClicks) < len(videos) {
+		ui.cardClicks = append(ui.cardClicks, widget.Clickable{})
+		ui.cardClockClicks = append(ui.cardClockClicks, widget.Clickable{})
+	}
+	var items []layout.Widget
+	for row := 0; row < (len(videos)+cols-1)/cols; row++ {
+		items = append(items, func(gtx layout.Context) layout.Dimensions {
+			return ui.layoutResponsiveGridRow(gtx, videos, row, cols)
+		})
+	}
+	return ui.layoutWatchItems(gtx, items, videos, 0, cols, yt.Video{})
 }
 
 // layoutWatchHero renders the hero unit with paused player preview and resume context.
@@ -188,6 +233,9 @@ func (ui *UI) layoutWatchHero(gtx layout.Context, hero yt.Video, pos store.Posit
 
 // layoutHeroPlayerPreview renders the 16:9 paused player preview with controls and scrub bar.
 func (ui *UI) layoutHeroPlayerPreview(gtx layout.Context, hero yt.Video, pos store.Position) layout.Dimensions {
+	if !ui.demo && !ui.deferWatchThumbnails {
+		ui.requestThumbnail(hero.ID)
+	}
 	w := gtx.Constraints.Max.X
 	h := w * 9 / 16
 	if h > gtx.Dp(308) {
@@ -372,9 +420,19 @@ func (ui *UI) layoutHeroCopy(gtx layout.Context, hero yt.Video, pos store.Positi
 							return lbl.Layout(gtx)
 						}),
 						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-							subText := "Architecture & city life"
-							if !ui.demo && hero.ViewCount > 0 {
-								subText = fmt.Sprintf("%d views", hero.ViewCount)
+							var metadata []string
+							if hero.ViewCount > 0 {
+								metadata = append(metadata, fmt.Sprintf("%d views", hero.ViewCount))
+							}
+							if age := FormatAge(hero.UploadDate, hero.PublishedAt, gtx.Now); age != "" {
+								metadata = append(metadata, age)
+							}
+							subText := strings.Join(metadata, " · ")
+							if ui.demo {
+								subText = "Architecture & city life"
+							}
+							if subText == "" {
+								return layout.Dimensions{}
 							}
 							lbl := ui.label(unit.Sp(11), subText)
 							lbl.Color = ui.colors.Text2
@@ -685,18 +743,30 @@ func (ui *UI) getWatchHero() (yt.Video, store.Position, bool) {
 	// 1. Check for latest unfinished video in positions
 	if ui.store != nil {
 		unfin := ui.store.UnfinishedPositions(ui.currentAccountID())
-		if len(unfin) > 0 {
-			latest := unfin[0]
-			for _, v := range ui.state.Videos {
-				if v.ID == latest.VideoID {
-					return v, latest.Position, true
+		for _, latest := range unfin {
+			if latest.Position.Space != "" && latest.Position.Space != SpaceWatch.String() {
+				continue
+			}
+			v := yt.Video{ID: latest.VideoID}
+			for _, item := range ui.state.Videos {
+				if item.ID == latest.VideoID {
+					v = item
+					break
 				}
 			}
-			return yt.Video{
-				ID:       latest.VideoID,
-				Title:    latest.VideoID,
-				Duration: int(latest.Position.Duration),
-			}, latest.Position, true
+			if v.Title == "" || v.Title == v.ID {
+				v.Title = latest.Position.Title
+			}
+			if v.Title == "" {
+				v.Title = v.ID
+			}
+			if v.Channel == "" {
+				v.Channel = latest.Position.Show
+			}
+			if v.Duration == 0 {
+				v.Duration = int(latest.Position.Duration)
+			}
+			return v, latest.Position, true
 		}
 	}
 
@@ -704,6 +774,9 @@ func (ui *UI) getWatchHero() (yt.Video, store.Position, bool) {
 	if len(ui.state.Videos) > 0 {
 		first := ui.state.Videos[0]
 		pos, _ := ui.getVideoPosition(first.ID)
+		if pos.Space != "" && pos.Space != SpaceWatch.String() {
+			pos = store.Position{}
+		}
 		return first, pos, true
 	}
 

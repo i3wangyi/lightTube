@@ -50,6 +50,18 @@ import (
 	"lighttube/internal/yt"
 )
 
+type thumbnailManager interface {
+	Get(string) (image.Image, bool)
+	Load(string, func(image.Image, error))
+	Request(string, string)
+	Clear()
+	Len() int
+	UsedBytes() int
+	GetAvatar(string) (image.Image, bool)
+	RequestAvatar(string)
+	SetOnEvict(func(string))
+}
+
 // Options holds runtime dependencies injected into the UI.
 type Options struct {
 	YTClient           *yt.Client
@@ -87,16 +99,17 @@ type Options struct {
 
 // UI manages the Gio window, layout, and event interactions.
 type UI struct {
-	startupMemory      startupMemory
-	startupStoreLoaded bool
-	startupFeedPending bool
-	fonts              *themeFonts
-	ytClient           *yt.Client
-	store              *store.Store
-	player             *player.Player
-	account            *yt.Account
-	thumbs             *thumbs.Manager
-	window             *app.Window
+	deferWatchThumbnails bool
+	startupMemory        startupMemory
+	startupStoreLoaded   bool
+	startupFeedPending   bool
+	fonts                *themeFonts
+	ytClient             *yt.Client
+	store                *store.Store
+	player               *player.Player
+	account              *yt.Account
+	thumbs               thumbnailManager
+	window               *app.Window
 
 	th     *material.Theme
 	colors ThemeColors

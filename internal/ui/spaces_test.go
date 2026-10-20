@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -917,6 +918,7 @@ func TestNoDemoStringsInLiveMode(t *testing.T) {
 
 	demoData := LoadDemoData()
 	demoStrings := map[string]bool{
+		"Architecture & city life":                    true,
 		"MADE FOR THE LATE HOURS":                     true,
 		"SAMPLE COLLECTION":                           true,
 		"MADE FOR THE LATE HOURS · SAMPLE COLLECTION": true,
@@ -949,10 +951,15 @@ func TestNoDemoStringsInLiveMode(t *testing.T) {
 		demoStrings[sh.Title] = true
 	}
 
-	ui := New(Options{
-		Demo:  false, // Live mode!
-		Store: st,
-	})
+	ui := New(Options{Demo: true, Store: st})
+	ui.demo, ui.demoData, ui.account, ui.thumbs = false, nil, nil, nil
+	for _, space := range []string{"Watch", "", "Shorts", "Podcasts", "Music"} {
+		if err := st.SaveMediaPosition(ui.currentAccountID(), "position_"+space, store.Position{
+			Seconds: 42, Duration: 600, Space: space, MediaKind: "video", Title: "Stored live title", Show: "Stored live creator",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	// Populate live fixture items with distinct non-demo names
 	ui.spaces.State(SpaceWatch).Videos = []yt.Video{
@@ -991,6 +998,12 @@ func TestNoDemoStringsInLiveMode(t *testing.T) {
 		r.Frame(&ops)
 	}
 
+	for _, state := range ui.spaces.Spaces {
+		state.ContentLoaded = true
+		state.ContentGeneration = ui.currentGen()
+	}
+	// Keep the live feed available for the first Watch frame.
+	ui.setWatchVideos(ui.spaces.State(SpaceWatch).Videos)
 	// Layout every space and every chip in live mode
 	for _, spaceID := range []SpaceID{SpaceWatch, SpaceShorts, SpacePodcasts, SpaceMusic} {
 		ui.switchSpace(spaceID)
@@ -1005,6 +1018,9 @@ func TestNoDemoStringsInLiveMode(t *testing.T) {
 		}
 	}
 
+	if !slices.Contains(recordedStrings, "Stored live title") {
+		t.Error("live fixture did not capture the stored hero title")
+	}
 	// Verify no demo string appears anywhere in rendered label strings
 	for _, s := range recordedStrings {
 		trimmed := strings.TrimSpace(s)
