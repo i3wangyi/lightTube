@@ -125,10 +125,18 @@ Playing a video adds it to history (newest first, keep 500).
 | Measure                          | Target            |
 |----------------------------------|-------------------|
 | Idle CPU, window open            | ≤ 1% of one core  |
-| Window memory (RSS)              | ≤ 90 MB           |
+| Window memory (RSS)              | ≤ 128 MB          |
 | Startup to first frame           | ≤ 500 ms          |
 | Search results shown             | ≤ 3 s             |
 | mpv playback, 1080p30            | ≤ 25% of one core |
+
+Window memory is measured signed in, with the Watch thumbnails drawn at
+sampling time, 25 s after start, in a 1200x760 dp window at scale 2
+(`measure2.sh`). The target was 90 MB until 2026-10-19; the user raised it
+to 128 MB after the four-spaces redesign, when about 48 MiB of the window
+RSS was graphics libraries and the binary (libLLVM, libgallium) and the
+live CJK font tables added about 20 MB. Measured then: about 109 MiB live,
+about 90 MiB demo.
 
 ## Phases
 
